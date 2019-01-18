@@ -1,128 +1,90 @@
-import QtQuick 1.1
+import QtQuick 2.6
 
 Rectangle {
     id: root
-
-    color: "black"
-    opacity: 0.8
-    radius: 15
-    border.color: "#aae3ef"
-    border.width: 2
-
+    color: theme.SplitAssistantBackground
+    radius: 3
+    opacity: 0.9
     signal selected(string orientation)
 
-    function _signal_for_index(index) {
-        if(index == 0) {
-            root.selected("row");
+    function signalForIndex(index) {
+        if(index === 0) {
+            selected("row");
         } else {
-            root.selected("col");
-        }
-    }
-
-    Component {
-        id: row
-        Row {
-            anchors.centerIn: parent
-            spacing: 5
-            Rectangle {
-                width: 50
-                height: 105
-                color: "orange"
-                radius: 5
-                Column {
-                    anchors.fill: parent
-                    anchors.topMargin: 5
-                    anchors.leftMargin: 2
-                    spacing: 2
-                    Text {
-                        text: "class MyClass(object):"
-                        color: "white"
-                        font.bold: true
-                        font.pixelSize: 9
-                        width: parent.width
-                        elide: Text.ElideRight
-                    }
-                    Text {
-                        text: "  def __init__(self):"
-                        color: "white"
-                        font.bold: true
-                        font.pixelSize: 9
-                        width: parent.width
-                        elide: Text.ElideRight
-                    }
-                }
-            }
-            Rectangle {
-                width: 50
-                height: 105
-                color: "orange"
-                radius: 5
-                Column {
-                    anchors.fill: parent
-                    anchors.topMargin: 5
-                    anchors.leftMargin: 2
-                    spacing: 2
-                    Text {
-                        text: "def func():"
-                        color: "white"
-                        font.bold: true
-                        font.pixelSize: 9
-                        width: parent.width
-                        elide: Text.ElideRight
-                    }
-                    Text {
-                        text: "  print 'NINJA-IDE'"
-                        color: "white"
-                        font.bold: true
-                        font.pixelSize: 9
-                        width: parent.width
-                        elide: Text.ElideRight
-                    }
-                }
-            }
+            selected("col");
         }
     }
 
     Component {
         id: col
         Column {
-            anchors.centerIn: parent
             spacing: 5
             Rectangle {
                 width: 100
                 height: 50
                 color: "lightblue"
-                radius: 5
+                radius: 3
+
                 Text {
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.topMargin: 5
-                    anchors.leftMargin: 2
+                    anchors.centerIn: parent
                     text: "class MyClass(object):\n  def __init__(self):"
                     font.bold: true
-                    color: "white"
-                    font.pixelSize: 9
-                    width: parent.width
-                    elide: Text.ElideRight
+                    color: theme.SplitAssistantText
+                    renderType: Text.NativeRendering
+                    font.pixelSize: 8
                 }
             }
             Rectangle {
                 width: 100
                 height: 50
                 color: "lightblue"
-                radius: 5
+                radius: 3
                 Text {
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.topMargin: 5
-                    anchors.leftMargin: 2
-                    text: "def func():\n  print 'NINJA-IDE'"
-                    color: "white"
+                    anchors.centerIn: parent
+                    text: "def func():\n  print('NINJA-IDE')"
+                    color: theme.SplitAssistantText
+                    renderType: Text.NativeRendering
                     font.bold: true
-                    font.pixelSize: 9
-                    width: parent.width
-                    elide: Text.ElideRight
+                    font.pixelSize: 8
                 }
+            }
+        }
+    }
+
+    Component {
+        id: row
+        Row {
+            spacing: 5
+            anchors.centerIn: parent
+            Rectangle {
+                width: 50; height: 105
+                color: "orange"
+                radius: 3
+                Text {
+                    anchors.centerIn: parent
+                    text: ("def func():
+    pass")
+                    color: theme.SplitAssistantText
+                    font.bold: true
+                    renderType: Text.NativeRendering
+                    font.pixelSize: 8
+                }
+            }
+            Rectangle {
+                width: 50
+                height: 105
+                color: "orange"
+                radius: 3
+                Text {
+                    anchors.centerIn: parent
+                    text: ("def func():
+    pass")
+                    renderType: Text.NativeRendering
+                    color: theme.SplitAssistantText
+                    font.bold: true
+                    font.pixelSize: 8
+                }
+
             }
         }
     }
@@ -130,18 +92,14 @@ Rectangle {
     ListView {
         id: list
         anchors.fill: parent
-        anchors.margins: 20
         spacing: 10
-        orientation: ListView.Horizontal
-        highlight: Rectangle { color: "lightsteelblue"; radius: 5 }
-        focus: true
+        anchors.margins: 20
         highlightMoveDuration: 150
-
         model: ListModel {
             ListElement { type: "row" }
             ListElement { type: "col" }
         }
-
+        orientation: ListView.Horizontal
         delegate: Rectangle {
             width: 120
             height: 120
@@ -150,29 +108,33 @@ Rectangle {
                 anchors.centerIn: parent
                 sourceComponent: type == "col" ? col : row
             }
-        }
 
-        Keys.onEnterPressed: { root._signal_for_index(list.currentIndex); }
-        Keys.onReturnPressed: { root._signal_for_index(list.currentIndex); }
+            Keys.onLeftPressed: {
+                list.currentIndex = 0;
+            }
+            Keys.onRightPressed: {
+                list.currentIndex = 1;
+            }
 
-        MouseArea {
-            anchors.fill: parent
-            onClicked: {
-                var index = list.indexAt(mouseX, mouseY);
-                list.currentIndex = index;
-                root._signal_for_index(index);
+            Keys.onReturnPressed: {
+                signalForIndex(list.currentIndex);
             }
         }
-    }
+        highlight: Rectangle { color: theme.SplitAssistantHighlight; radius: 3 }
+        focus: true
 
+
+    }
     Text {
         text: "Esc to exit"
         anchors {
             right: parent.right
             top: parent.top
-            margins: 5
+            rightMargin: 10
+            topMargin: 3
         }
-        color: "white"
-        font.pointSize: 10
+        renderType: Text.NativeRendering
+        color: theme.SplitAssistantText
+        font.pointSize: 8
     }
 }

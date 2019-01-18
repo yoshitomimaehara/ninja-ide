@@ -22,7 +22,7 @@ import re
 import threading
 import shutil
 
-from PyQt4 import QtCore
+from PyQt5 import QtCore
 
 from ninja_ide.core import settings
 
@@ -32,7 +32,7 @@ else:
     python3 = False
 
 
-#Lock to protect the file's writing operation
+# Lock to protect the file's writing operation
 file_store_content_lock = threading.Lock()
 
 
@@ -151,9 +151,9 @@ def get_file_encoding(content):
                     encoding = line_encoding
                     break
     except UnicodeDecodeError as error:
-        #add logger
+        # add logger
         print(error)
-    #if not encoding is set then use UTF-8 as default
+    # if not encoding is set then use UTF-8 as default
     if encoding is None:
         encoding = "UTF-8"
     return encoding
@@ -166,7 +166,7 @@ def read_file_content(fileName):
             content = f.read()
     except IOError as reason:
         raise NinjaIOException(reason)
-    except:
+    except Exception:
         raise
     return content
 
@@ -210,7 +210,7 @@ def store_file_content(fileName, content, addExtension=True, newFile=False):
         f.write(encoded_stream)
         f.flush()
         f.close()
-    except:
+    except Exception:
         raise
     return os.path.abspath(fileName)
 
@@ -318,7 +318,7 @@ def has_write_permission(fileName):
 def check_for_external_modification(fileName, old_mtime):
     """Check if the file was modified outside ninja."""
     new_modification_time = get_last_modification(fileName)
-    #check the file mtime attribute calling os.stat()
+    # check the file mtime attribute calling os.stat()
     if new_modification_time > old_mtime:
         return True
     return False
@@ -328,7 +328,7 @@ def get_files_from_folder(folder, ext):
     """Get the files in folder with the specified extension."""
     try:
         filesExt = os.listdir(folder)
-    except:
+    except Exception:
         filesExt = []
     filesExt = [f for f in filesExt if f.endswith(ext)]
     return filesExt
@@ -340,3 +340,25 @@ def is_supported_extension(filename, extensions=None):
     if os.path.splitext(filename.lower())[-1] in extensions:
         return True
     return False
+
+
+def show_containing_folder(path):
+    """Cross-platform show containing folder of path"""
+
+    file_info = QtCore.QFileInfo(path)
+    program = ""
+    param = []
+    if settings.IS_WINDOWS:
+        program = "explorer.exe"
+        param.append("/select,")
+        param.append(QtCore.QDir.toNativeSeparators(
+                    file_info.canonicalFilePath()))
+    elif settings.IS_MAC_OS:
+        program = "open"
+        param.append("-R")
+        param.append(file_info.absolutePath())
+    else:
+        program = "xdg-open"
+        param.append(file_info.absolutePath())
+
+    QtCore.QProcess.startDetached(program, param)

@@ -15,6 +15,196 @@
 # You should have received a copy of the GNU General Public License
 # along with NINJA-IDE; If not, see <http://www.gnu.org/licenses/>.
 
+import os
+import sys
+from PyQt5.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QSizePolicy,
+    QSpacerItem,
+    QFileDialog,
+    QGroupBox,
+    QLabel,
+    QCheckBox,
+    QLineEdit,
+    QCompleter,
+    QRadioButton,
+    QButtonGroup,
+    QPushButton,
+    QDirModel,
+    QCompleter,
+    QComboBox
+)
+from PyQt5.QtCore import (
+    QDir,
+    pyqtSlot
+)
+from ninja_ide.gui.ide import IDE
+from ninja_ide.gui.dialogs.preferences import preferences
+from ninja_ide import translations
+from ninja_ide.core import settings
+from ninja_ide.tools import utils
+
+
+class GeneralExecution(QWidget):
+    """General Execution widget class"""
+
+    def __init__(self, parent):
+        super().__init__()
+        self._preferences = parent
+        box = QVBoxLayout(self)
+
+        group_python_path = QGroupBox(translations.TR_WORKSPACE_PROJECTS)
+        group_python_opt = QGroupBox(translations.TR_PYTHON_OPTIONS)
+
+        vbox = QVBoxLayout(group_python_path)
+        box_path = QVBoxLayout()
+        # Line python path
+        hbox_path = QHBoxLayout()
+        self._combo_python_path = QComboBox()
+        self._combo_python_path.setEditable(True)
+        self._combo_python_path.addItems(utils.get_python())
+
+        hbox_path.addWidget(self._combo_python_path)
+        self._combo_python_path.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn_choose_path = QPushButton(
+            self.style().standardIcon(self.style().SP_DirIcon), '')
+        box_path.addWidget(
+            QLabel(
+                translations.TR_PREFERENCES_EXECUTION_PYTHON_INTERPRETER_LBL))
+        hbox_path.addWidget(btn_choose_path)
+        box_path.addLayout(hbox_path)
+        vbox.addLayout(box_path)
+
+        # Python Miscellaneous Execution options
+        vbox_opts = QVBoxLayout(group_python_opt)
+        self._check_B = QCheckBox(translations.TR_SELECT_EXEC_OPTION_B)
+        self._check_d = QCheckBox(translations.TR_SELECT_EXEC_OPTION_D)
+        self._check_E = QCheckBox(translations.TR_SELECT_EXEC_OPTION_E)
+        self._check_O = QCheckBox(translations.TR_SELECT_EXEC_OPTION_O)
+        self._check_OO = QCheckBox(translations.TR_SELECT_EXEC_OPTION_OO)
+        self._check_s = QCheckBox(translations.TR_SELECT_EXEC_OPTION_s)
+        self._check_S = QCheckBox(translations.TR_SELECT_EXEC_OPTION_S)
+        self._check_v = QCheckBox(translations.TR_SELECT_EXEC_OPTION_V)
+        hbox = QHBoxLayout()
+        self._check_W = QCheckBox(translations.TR_SELECT_EXEC_OPTION_W)
+        self._combo_warning = QComboBox()
+        self._combo_warning.addItems([
+            "default", "ignore", "all", "module", "once", "error"
+        ])
+        self._check_W.stateChanged.connect(
+            lambda state: self._combo_warning.setEnabled(bool(state)))
+
+        vbox_opts.addWidget(self._check_B)
+        vbox_opts.addWidget(self._check_d)
+        vbox_opts.addWidget(self._check_E)
+        vbox_opts.addWidget(self._check_O)
+        vbox_opts.addWidget(self._check_OO)
+        vbox_opts.addWidget(self._check_s)
+        vbox_opts.addWidget(self._check_S)
+        vbox_opts.addWidget(self._check_v)
+        hbox.addWidget(self._check_W)
+        hbox.addWidget(self._combo_warning)
+        vbox_opts.addLayout(hbox)
+        """
+        completer = QCompleter(self)
+        dirs = QDirModel(self)
+        dirs.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot)
+        completer.setModel(dirs)
+        self._txt_python_path.setCompleter(completer)
+        box_path.addWidget(default_interpreter_radio)
+        box_path.addWidget(custom_interpreter_radio)
+        """
+
+        box.addWidget(group_python_path)
+        box.addWidget(group_python_opt)
+        box.addItem(QSpacerItem(0, 0,
+                    QSizePolicy.Expanding, QSizePolicy.Expanding))
+
+        # Settings
+        self._combo_python_path.setCurrentText(settings.PYTHON_EXEC)
+        options = settings.EXECUTION_OPTIONS.split()
+        if "-B" in options:
+            self._check_B.setChecked(True)
+        if "-d" in options:
+            self._check_d.setChecked(True)
+        if "-E" in options:
+            self._check_E.setChecked(True)
+        if "-O" in options:
+            self._check_O.setChecked(True)
+        if "-OO" in options:
+            self._check_OO.setChecked(True)
+        if "-S" in options:
+            self._check_S.setChecked(True)
+        if "-s" in options:
+            self._check_s.setChecked(True)
+        if "-v" in options:
+            self._check_v.setChecked(True)
+        if settings.EXECUTION_OPTIONS.find("-W") > -1:
+            self._check_W.setChecked(True)
+            index = settings.EXECUTION_OPTIONS.find("-W")
+            opt = settings.EXECUTION_OPTIONS[index + 2:].strip()
+            index = self._combo_warning.findText(opt)
+
+            self._combo_warning.setCurrentIndex(index)
+        # Connections
+        self._preferences.savePreferences.connect(self.save)
+        btn_choose_path.clicked.connect(self._load_python_path)
+
+    @pyqtSlot()
+    def _load_python_path(self):
+        """Ask the user for a Python Path"""
+        path = QFileDialog.getOpenFileName(
+            self, translations.TR_SELECT_SELECT_PYTHON_EXEC)[0]
+        if path:
+            self._combo_python_path.setEditText(path)
+
+    def save(self):
+        """Save all Execution Preferences"""
+
+        qsettings = IDE.ninja_settings()
+        qsettings.beginGroup("execution")
+
+        # Python executable
+        settings.PYTHON_EXEC = self._combo_python_path.currentText()
+        qsettings.setValue("pythonExec", settings.PYTHON_EXEC)
+
+        # Execution options
+        options = ""
+        if self._check_B.isChecked():
+            options += " -B"
+        if self._check_d.isChecked():
+            options += " -d"
+        if self._check_E.isChecked():
+            options += " -E"
+        if self._check_O.isChecked():
+            options += " -O"
+        if self._check_OO.isChecked():
+            options += " -OO"
+        if self._check_s.isChecked():
+            options += " -s"
+        if self._check_S.isChecked():
+            options += " -S"
+        if self._check_v.isChecked():
+            options += " -v"
+        if self._check_W.isChecked():
+            options += " -W" + self._combo_warning.currentText()
+        settings.EXECUTION_OPTIONS = options
+        qsettings.setValue("executionOptions", options)
+
+        qsettings.endGroup()
+
+
+preferences.Preferences.register_configuration(
+    'GENERAL',
+    GeneralExecution,
+    translations.TR_PREFERENCES_EXECUTION,
+    weight=1,
+    subsection='EXECUTION'
+)
+"""
 from __future__ import absolute_import
 from __future__ import unicode_literals
 
@@ -41,7 +231,7 @@ from ninja_ide.gui.dialogs.preferences import preferences
 
 
 class GeneralExecution(QWidget):
-    """General Execution widget class"""
+    # General Execution widget class
 
     def __init__(self, parent):
         super(GeneralExecution, self).__init__()
@@ -152,14 +342,14 @@ class GeneralExecution(QWidget):
         self.connect(self._preferences, SIGNAL("savePreferences()"), self.save)
 
     def _load_python_path(self):
-        """Ask the user for a Python Path"""
+        # Ask the user for a Python Path
         path = QFileDialog.getOpenFileName(self,
             translations.TR_SELECT_SELECT_PYTHON_EXEC)
         if path:
             self._txtPythonPath.setText(path)
 
     def save(self):
-        """Save all the Execution Preferences"""
+        # Save all the Execution Preferences
         qsettings = IDE.ninja_settings()
         qsettings.beginGroup('preferences')
         qsettings.beginGroup('execution')
@@ -203,3 +393,4 @@ class GeneralExecution(QWidget):
 preferences.Preferences.register_configuration('GENERAL', GeneralExecution,
     translations.TR_PREFERENCES_EXECUTION,
     weight=1, subsection='EXECUTION')
+"""

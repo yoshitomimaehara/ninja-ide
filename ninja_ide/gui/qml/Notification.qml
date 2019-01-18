@@ -1,19 +1,18 @@
-import QtQuick 1.1
+import QtQuick 2.6
 
 Rectangle {
     id: frame
-    width: 400
-    height: 40
-    color: "black"
     opacity: 0
-    radius: 15
-    border.color: "#aae3ef"
-    border.width: 2
-
-    property int interval: 3000
+    property int duration: 3000
+    property int interval: 500
     signal close
 
     function setText(message){
+        textArea.text = message;
+    }
+
+    function updateText(message) {
+        timer.restart();
         textArea.text = message;
     }
 
@@ -22,16 +21,36 @@ Rectangle {
         textArea.color = foreground_color;
     }
 
-    function start(interval) {
-        frame.interval = interval;
+    function start(duration) {
+        frame.duration = duration;
         showFrame.start();
     }
 
-    SequentialAnimation {
+
+    NumberAnimation {
         id: showFrame
-        running: false
-        NumberAnimation { target: frame; property: "opacity"; to: 1; duration: (frame.interval / 2); easing.type: Easing.InOutQuad }
-        NumberAnimation { target: frame; property: "opacity"; to: 0; duration: (frame.interval / 2); easing.type: Easing.InOutQuad }
+        target: frame
+        property: "opacity"
+        to: 1
+        duration: interval
+        easing.type: Easing.InOutQuad
+
+        onStopped: timer.start()
+    }
+
+
+    NumberAnimation {
+        id: hideFrame
+        target: frame
+        property: "opacity"
+        to: 0
+        duration: interval
+        easing.type: Easing.InOutQuad
+    }
+    Timer {
+        id: timer
+        interval: duration; running: false
+        onTriggered: hideFrame.start()
     }
 
     onOpacityChanged: {
@@ -43,12 +62,12 @@ Rectangle {
     Text{
         id: textArea
         text: ""
-        wrapMode: Text.WordWrap
-        font.pixelSize: 16
+//        wrapMode: Text.WordWrap
+//        font.pixelSize: 16
         font.bold: true
-        anchors.fill: parent
-        anchors.margins: 10
-        color: "white"
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left
+        anchors.leftMargin: 10
         width: frame.width
         elide: Text.ElideRight
     }

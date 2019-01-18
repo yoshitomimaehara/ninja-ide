@@ -1,13 +1,11 @@
-import QtQuick 1.1
+import QtQuick 2.5
 
 Rectangle {
     id: root
 
-    radius: 5
-    color: "#202123"
-    border.width: 1
-    border.color: "gray"
-
+    color: theme.FilesHandlerBackground
+    focus: true
+    property bool simple: false
     PropertyAnimation {
         id: showAnim
         target: root
@@ -21,6 +19,10 @@ Rectangle {
     signal close(string path, string tempFile)
     signal hide
     signal fuzzySearch(string search)
+
+    function setMode(mode) {
+        root.simple = mode;
+    }
 
     function activateInput() {
         input.text = "";
@@ -123,18 +125,17 @@ Rectangle {
 
     Rectangle {
         id: inputArea
-        radius: 2
-        color: "#2d2f31"
+        //radius: 2
+        color: theme.FilesHandlerInput
         height: 30
         anchors {
             left: parent.left
             right: parent.right
             top: parent.top
-            margins: 10
+            margins: 5
         }
-        border.color: "black"
-        border.width: 1
-        smooth: true
+        border.color: theme.RectangleBorder
+        border.width: 2
 
         TextInput {
             id: input
@@ -142,16 +143,17 @@ Rectangle {
                 fill: parent
                 margins: 4
             }
-            focus: true
-            clip: true
-            color: "white"
-            font.pixelSize: 18
 
+            clip: true
+            focus: true
+            smooth: true
+            color: theme.FilesHandlerText
+            font.pixelSize: 18
             onTextChanged: {
                 var firstValidItem = -1;
                 for (var i = 0; i < listFiles.model.count; i++) {
                     var item = listFiles.model.get(i);
-                    if (item.name.indexOf(input.text) == -1) {
+                    if (item.name.indexOf(input.text) === -1) {
                         item.itemVisible = false;
                     } else {
                         if (firstValidItem == -1) firstValidItem = i;
@@ -202,13 +204,20 @@ Rectangle {
             id: item
             visible: itemVisible
             width: parent.width
-            property int defaultValues: checkers ? 70 : 60
+            property int defaultValues: checkers && (!root.simple) ? 70 : (listFuzzyFiles.visible && root.simple) ? 40: 60
             height: itemVisible ? defaultValues : 0
             property bool current: ListView.isCurrentItem
-            color: item.current ? "#6a6ea9" : "#27292b"
+            color: item.current ? theme.FilesHandlerCurrentItem : theme.FilesHandlerListView
 
-            property string mainTextColor: item.current ? "white" : "#aaaaaa"
-            property string mainTextModifiedColor: item.current ? "lightgreen" : "green"
+            property string mainTextColor: item.current ? theme.FilesHandlerText : "red"
+            property string mainTextModifiedColor: item.current ? theme.FilesHandlerText : "green"
+
+            SequentialAnimation {
+                id: closeAnimation
+                PropertyAction { target: item; property: "ListView.delayRemove"; value: true }
+                NumberAnimation { target: item; property: "scale"; to: 0; duration: 250; easing.type: Easing.InOutQuad }
+                PropertyAction { target: item; property: "ListView.delayRemove"; value: false }
+            }
 
             MouseArea {
                 anchors.fill: parent
@@ -227,7 +236,7 @@ Rectangle {
                 anchors.fill: imgClose
                 anchors.margins: 2
                 radius: width / 2
-                color: "white"
+                color: "black"
             }
 
             Image {
@@ -239,16 +248,15 @@ Rectangle {
 
                 MouseArea {
                     anchors.fill: parent
-
                     onClicked: {
                         var path = listFiles.model.get(index).path;
                         var tempFile = listFiles.model.get(index).tempFile;
-                        //FIXME: when index == 0 then start removing the wrong items
-                        if(index == 0) {
-                            root.hide();
-                        }
                         root.close(path, tempFile);
                         listFiles.model.remove(index);
+                        if(listFiles.model.count === 0) {
+                            root.hide()
+                        }
+                        closeAnimation.start();
                     }
                 }
             }
@@ -267,7 +275,7 @@ Rectangle {
                         right: parent.right
                         rightMargin: imgClose.width
                     }
-                    color: modified ? mainTextModifiedColor : mainTextColor
+                    color: modified ? mainTextModifiedColor : theme.FilesHandlerText
                     font.pixelSize: 18
                     font.bold: true
                     text: name
@@ -279,7 +287,8 @@ Rectangle {
                         left: parent.left
                         right: parent.right
                     }
-                    color: item.current ? "#aaaaaa" : "#555555"
+                    visible: !root.simple
+                    color: item.current ? theme.FilesHandlerText : theme.FilesHandlerAlternativeText
                     elide: Text.ElideLeft
                     text: path
                 }
@@ -288,11 +297,14 @@ Rectangle {
                 anchors {
                     right: parent.right
                     top: col.bottom
+                    rightMargin: 3
                 }
+                visible: !root.simple
                 spacing: 10
                 Repeater {
                     model: checkers
                     Text {
+                        renderType: Text.NativeRendering
                         color: checker_color
                         text: checker_text
                         visible: checker_text.length > 0 ? true : false
@@ -314,7 +326,7 @@ Rectangle {
         }
         spacing: 2
 
-        focus: true
+        clip: true
         model: ListModel {}
         delegate: tabDelegate
         highlightMoveDuration: 200
@@ -326,13 +338,13 @@ Rectangle {
             left: parent.left
             right: parent.right
             bottom: parent.bottom
-            top: fuzzyText.bottom
+            top: inputArea.bottom
             margins: 5
         }
         visible: !listFiles.visible
         spacing: 2
 
-        focus: true
+        clip: true
         model: ListModel {}
         delegate: tabDelegate
         highlightMoveDuration: 200

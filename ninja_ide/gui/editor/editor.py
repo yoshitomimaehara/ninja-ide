@@ -14,327 +14,162 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with NINJA-IDE; If not, see <http://www.gnu.org/licenses/>.
-from __future__ import absolute_import
-from __future__ import unicode_literals
 
 import re
-import bisect
+import sys
+import sre_constants
+from collections import OrderedDict
 
-from tokenize import generate_tokens, TokenError
-#lint:disable
-try:
-    from StringIO import StringIO
-except:
-    from io import StringIO
-#lint:enable
+from PyQt5.QtWidgets import QFrame
+from PyQt5.QtWidgets import QToolTip
 
-from PyQt4.QtGui import QToolTip
-from PyQt4.QtGui import QAction
-from PyQt4.QtGui import QInputDialog
-from PyQt4.QtGui import QMenu
-from PyQt4.QtGui import QColor
-from PyQt4.QtGui import QKeySequence
-from PyQt4.QtCore import SIGNAL
-from PyQt4.QtCore import QMimeData
-from PyQt4.QtCore import Qt
-from PyQt4.QtCore import QTimer
+from PyQt5.QtGui import QTextCursor
+# from PyQt5.QtGui import QTextDocument
+from PyQt5.QtGui import QFontMetrics
+from PyQt5.QtGui import QKeySequence
+
+from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import pyqtSlot
+from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QEvent
 
 from ninja_ide import resources
+from ninja_ide.tools import utils
 from ninja_ide.core import settings
-#from ninja_ide.core.file_handling import file_manager
-##from ninja_ide.tools.completion import completer_widget
 from ninja_ide.gui.ide import IDE
+from ninja_ide.gui.editor import indenter
 from ninja_ide.gui.editor import highlighter
-from ninja_ide.gui.editor import helpers
-from ninja_ide.gui.editor import minimap
-from ninja_ide.gui.editor import document_map
-from ninja_ide.extensions import handlers
+from ninja_ide.gui.editor import base_editor
+from ninja_ide.gui.editor import scrollbar
+from ninja_ide.gui.editor import extra_selection
+# Extensions
+from ninja_ide.gui.editor.extensions import symbol_highlighter
+from ninja_ide.gui.editor.extensions import line_highlighter
+from ninja_ide.gui.editor.extensions import margin_line
+from ninja_ide.gui.editor.extensions import indentation_guides
+from ninja_ide.gui.editor.extensions import braces
+from ninja_ide.gui.editor.extensions import quotes
+# from ninja_ide.gui.editor.extensions import calltip
+# Side
+from ninja_ide.gui.editor.side_area import manager
+from ninja_ide.gui.editor.side_area import line_number_widget
+from ninja_ide.gui.editor.side_area import text_change_widget
+from ninja_ide.gui.editor.side_area import code_folding
+from ninja_ide.gui.editor.side_area import marker_widget
 
-from PyQt4.Qsci import QsciScintilla  # , QsciCommand
-
-from ninja_ide.tools.logger import NinjaLogger
-logger = NinjaLogger('ninja_ide.gui.editor.editor')
-
-BRACE_DICT = {')': '(', ']': '[', '}': '{', '(': ')', '[': ']', '{': '}'}
+# TODO: separte this module and create a editor component
 
 
-class Editor(QsciScintilla):
+class NEditor(base_editor.BaseEditor):
 
-###############################################################################
-# EDITOR SIGNALS
-###############################################################################
-    """
-    modificationChanged(bool)
-    fileSaved(QPlainTextEdit)
-    locateFunction(QString, QString, bool) [functionName, filePath, isVariable]
-    openDropFile(QString)
-    addBackItemNavigation()
-    findOcurrences(QString)
-    cursorPositionChange(int, int)    #row, col
-    migrationAnalyzed()
-    currentLineChanged(int)
-    """
-###############################################################################
+    goToDefRequested = pyqtSignal("PyQt_PyObject")
+    painted = pyqtSignal("PyQt_PyObject")
+    keyPressed = pyqtSignal("PyQt_PyObject")
+    keyReleased = pyqtSignal("PyQt_PyObject")
+    postKeyPressed = pyqtSignal("PyQt_PyObject")
+    addBackItemNavigation = pyqtSignal()
+    editorFocusObtained = pyqtSignal()
+    # FIXME: cambiar nombre
+    cursor_position_changed = pyqtSignal(int, int)
+    current_line_changed = pyqtSignal(int)
 
-    __indicator_word = 0
-    __indicator_folded = 2
-    __indicator_navigation = 3
-
-    def _configure_qscintilla(self):
-        self._first_visible_line = 0
-        self.patFold = re.compile(
-            r"(\s)*\"\"\"|(\s)*def |(\s)*class |(\s)*if |(\s)*while |"
-            "(\s)*else:|(\s)*elif |(\s)*for |"
-            "(\s)*try:|(\s)*except:|(\s)*except |(.)*\($")
-        self.setAutoIndent(True)
-        self.setBackspaceUnindents(True)
-        self.setCaretLineVisible(True)
-        line_color = QColor(
-            resources.CUSTOM_SCHEME.get(
-                'CurrentLine',
-                resources.COLOR_SCHEME['CurrentLine']))
-        caretColor = QColor(
-            resources.CUSTOM_SCHEME.get(
-                'Caret',
-                resources.COLOR_SCHEME['Caret']))
-        self.setCaretLineBackgroundColor(line_color)
-        self.setCaretForegroundColor(caretColor)
-        self.setBraceMatching(QsciScintilla.StrictBraceMatch)
-        self.SendScintilla(QsciScintilla.SCI_SETBUFFEREDDRAW, 0)
-        self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 0)
-        self.setMatchedBraceBackgroundColor(QColor(
-            resources.CUSTOM_SCHEME.get(
-                'BraceBackground',
-                resources.COLOR_SCHEME.get('BraceBackground'))))
-        self.setMatchedBraceForegroundColor(QColor(
-            resources.CUSTOM_SCHEME.get(
-                'BraceForeground',
-                resources.COLOR_SCHEME.get('BraceForeground'))))
-
-        self.SendScintilla(QsciScintilla.SCI_INDICSETFORE,
-                           self.__indicator_word,
-                           int(resources.get_color_hex("SelectedWord"), 16))
-        self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE,
-                           self.__indicator_word, 6)
-        self.SendScintilla(QsciScintilla.SCI_INDICSETFORE,
-                           self.__indicator_folded, int("ffffff", 16))
-        self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE,
-                           self.__indicator_folded, 0)
-        self._navigation_highlight_active = False
-        self.SendScintilla(QsciScintilla.SCI_INDICSETFORE,
-                           self.__indicator_navigation,
-                           int(resources.get_color_hex("LinkNavigate"), 16))
-        self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE,
-                           self.__indicator_navigation, 8)
-        self.SendScintilla(QsciScintilla.SCI_INDICSETALPHA,
-                           self.__indicator_navigation, 40)
-
-        # Sets QScintilla into unicode mode
-        self.SendScintilla(QsciScintilla.SCI_SETCODEPAGE, 65001)
-        # Enable multiple selection
-        self.SendScintilla(QsciScintilla.SCI_SETMULTIPLESELECTION, 1)
-        self.SendScintilla(QsciScintilla.SCI_SETADDITIONALSELECTIONTYPING, 1)
+    _MAX_CHECKER_SELECTIONS = 150  # For good performance
 
     def __init__(self, neditable):
-        super(Editor, self).__init__()
+        super().__init__()
+        self.setFrameStyle(QFrame.NoFrame)
         self._neditable = neditable
-
-        # QScintilla Configuration
-        self._configure_qscintilla()
-
-        # Markers
-        self.foldable_lines = []
-        self.breakpoints = []
-        self.bookmarks = []
-        self.search_lines = []
-        self._fold_expanded_marker = 1
-        self._fold_collapsed_marker = 2
-        self._bookmark_marker = 3
-        self._breakpoint_marker = 4
-        self.setMarginSensitivity(1, True)
-        self.connect(
-            self,
-            SIGNAL('marginClicked(int, int, Qt::KeyboardModifiers)'),
-            self.on_margin_clicked)
-        color_fore = resources.get_color("FoldArea")
-        # Marker Fold Expanded
-        self.markerDefine(QsciScintilla.DownTriangle,
-                          self._fold_expanded_marker)
-        color = resources.get_color("FoldArrowExpanded")
-        self.setMarkerBackgroundColor(QColor(color), self._fold_expanded_marker)
-        self.setMarkerForegroundColor(QColor(color_fore),
-                                      self._fold_expanded_marker)
-        # Marker Fold Collapsed
-        self.markerDefine(QsciScintilla.RightTriangle,
-                          self._fold_collapsed_marker)
-        color = resources.get_color("FoldArrowCollapsed")
-        self.setMarkerBackgroundColor(QColor(color),
-                                      self._fold_collapsed_marker)
-        self.setMarkerForegroundColor(QColor(color_fore),
-                                      self._fold_collapsed_marker)
-        # Marker Breakpoint
-        self.markerDefine(QsciScintilla.Circle,
-                          self._breakpoint_marker)
-        self.setMarkerBackgroundColor(QColor(255, 11, 11),
-                                      self._breakpoint_marker)
-        self.setMarkerForegroundColor(QColor(color_fore),
-                                      self._breakpoint_marker)
-        # Marker Bookmark
-        self.markerDefine(QsciScintilla.SmallRectangle,
-                          self._bookmark_marker)
-        self.setMarkerBackgroundColor(QColor(10, 158, 227),
-                                      self._bookmark_marker)
-        self.setMarkerForegroundColor(QColor(color_fore),
-                                      self._bookmark_marker)
-        # Configure key bindings
-        self._configure_keybindings()
-
-        self.lexer = highlighter.get_lexer(self._neditable.extension())
-
-        if self.lexer is not None:
-            self.setLexer(self.lexer)
-
-        #Config Editor
-        self._mini = None
-        if settings.SHOW_MINIMAP:
-            self._load_minimap(settings.SHOW_MINIMAP)
-        self._docmap = None
-        if settings.SHOW_DOCMAP:
-            self._load_docmap(settings.SHOW_DOCMAP)
-            self.cursorPositionChanged.connect(self._docmap.update)
-
-        self._last_block_position = 0
-        self.set_flags()
-        #FIXME this lang should be guessed in the same form as lexer.
-        self.lang = highlighter.get_lang(self._neditable.extension())
-        self._cursor_line = self._cursor_index = -1
-        self.__lines_count = 0
-        self.pos_margin = 0
-        self._indentation_guide = 0
-        self._indent = 0
-        self.__font = None
+        self.allow_word_wrap(False)
+        self.setMouseTracking(True)
+        self.setCursorWidth(2)
         self.__encoding = None
-        self.__positions = []  # Caret positions
-        self.SCN_CHARADDED.connect(self._on_char_added)
+        self._highlighter = None
+        self._last_line_position = 0
+        # Extra Selections
+        self._extra_selections = ExtraSelectionManager(self)
+        # Load indenter based on language
+        self._indenter = indenter.load_indenter(self, neditable.language())
+        # Widgets on side area
+        self.side_widgets = manager.SideWidgetManager(self)
 
-        #FIXME these should be language bound
-        self.allows_less_indentation = ['else', 'elif', 'finally', 'except']
+        self.__link_pressed = False
+
+        # Set editor font before build lexer
         self.set_font(settings.FONT)
-        self._selected_word = ''
-        self._patIsWord = re.compile('\w+')
-        #Completer
-        #self.completer = completer_widget.CodeCompletionWidget(self)
-        #Dict functions for KeyPress
-        self.preKeyPress = {
-            Qt.Key_Backspace: self.__backspace,
-            Qt.Key_Enter: self.__ignore_extended_line,
-            Qt.Key_Return: self.__ignore_extended_line,
-            #Qt.Key_Colon: self.__retreat_to_keywords,
-            Qt.Key_BracketRight: self.__brace_completion,
-            Qt.Key_BraceRight: self.__brace_completion,
-            Qt.Key_ParenRight: self.__brace_completion,
-            Qt.Key_Apostrophe: self.__quot_completion,
-            Qt.Key_QuoteDbl: self.__quot_completion}
-
-        self.postKeyPress = {
-            Qt.Key_Enter: self.__auto_indent,
-            Qt.Key_Return: self.__auto_indent,
-            Qt.Key_BracketLeft: self.__complete_braces,
-            Qt.Key_BraceLeft: self.__complete_braces,
-            Qt.Key_ParenLeft: self.__complete_braces,
-            Qt.Key_Apostrophe: self.__complete_quotes,
-            Qt.Key_QuoteDbl: self.__complete_quotes}
-
-        # Highlight word timer
+        # Register extensions
+        self.__extensions = {}
+        # Brace matching
+        self._brace_matching = self.register_extension(
+            symbol_highlighter.SymbolHighlighter)
+        self.brace_matching = settings.BRACE_MATCHING
+        # Current line highlighter
+        self._line_highlighter = self.register_extension(
+            line_highlighter.CurrentLineHighlighter)
+        self.highlight_current_line = settings.HIGHLIGHT_CURRENT_LINE
+        # Right margin line
+        self._margin_line = self.register_extension(margin_line.RightMargin)
+        self.margin_line = settings.SHOW_MARGIN_LINE
+        self.margin_line_position = settings.MARGIN_LINE
+        self.margin_line_background = settings.MARGIN_LINE_BACKGROUND
+        # Indentation guides
+        self._indentation_guides = self.register_extension(
+            indentation_guides.IndentationGuide)
+        self.show_indentation_guides(settings.SHOW_INDENTATION_GUIDES)
+        # Autocomplete braces
+        self.__autocomplete_braces = self.register_extension(
+            braces.AutocompleteBraces)
+        self.autocomplete_braces(settings.AUTOCOMPLETE_BRACKETS)
+        # Autocomplete quotes
+        self.__autocomplete_quotes = self.register_extension(
+            quotes.AutocompleteQuotes)
+        self.autocomplete_quotes(settings.AUTOCOMPLETE_QUOTES)
+        # Calltips
+        # self.register_extension(calltip.CallTips)
+        # Highlight word under cursor
+        self.__word_occurrences = []
         self._highlight_word_timer = QTimer()
         self._highlight_word_timer.setSingleShot(True)
-        self._highlight_word_timer.timeout.connect(self.highlight_selected_word)
-        # Highlight the words under cursor after 500 msec, starting when
-        # the cursor changes position
-        self.cursorPositionChanged.connect(
-            lambda: self._highlight_word_timer.start(500))
-
-        self.connect(self, SIGNAL("linesChanged()"), self._update_sidebar)
-        self.connect(self, SIGNAL("blockCountChanged(int)"),
-                     self._update_file_metadata)
-
-        self.load_project_config()
-        #Context Menu Options
-        self.__actionFindOccurrences = QAction(self.tr("Find Usages"), self)
-        self.connect(self.__actionFindOccurrences, SIGNAL("triggered()"),
-                     self._find_occurrences)
-
-        ninjaide = IDE.get_service('ide')
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_font(PyQt_PyObject)"),
-            self.set_font)
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_showTabsAndSpaces(PyQt_PyObject)"),
-            self.set_flags)
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_showIndentationGuide(PyQt_PyObject)"),
-            self.set_flags)
-        #TODO: figure it out it doesn´t work if gets shown after init
-        self.connect(ninjaide,
-            SIGNAL("ns_preferences_editor_minimapShow(PyQt_PyObject)"),
-            self._load_minimap)
-        self.connect(ninjaide,
-            SIGNAL("ns_preferences_editor_docmapShow(PyQt_PyObject)"),
-            self._load_docmap)
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_indent(PyQt_PyObject)"),
-            self.load_project_config)
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_marginLine(PyQt_PyObject)"),
-            self._set_margin_line)
-        self.connect(
-            ninjaide,
-            SIGNAL("ns_preferences_editor_showLineNumbers(PyQt_PyObject)"),
-            self._show_line_numbers)
-        self.connect(ninjaide,
-                     SIGNAL(
-            "ns_preferences_editor_errorsUnderlineBackground(PyQt_PyObject)"),
-                self._change_indicator_style)
-        #self.connect(
-            #ninjaide,
-            #SIGNAL("ns_preferences_editor_scheme(PyQt_PyObject)"),
-            #self.restyle)
-        #self.connect(
-            #ninjaide,
-            #SIGNAL("ns_preferences_editor_scheme(PyQt_PyObject)"),
-            #lambda: self.restyle())
-
+        self._highlight_word_timer.setInterval(1000)
+        self._highlight_word_timer.timeout.connect(
+            self.highlight_selected_word)
+        # Install custom scrollbar
+        self._scrollbar = scrollbar.NScrollBar(self)
+        self._scrollbar.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setVerticalScrollBar(self._scrollbar)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.additional_builtins = None
         # Set the editor after initialization
-        if self._neditable.editor:
-            self.setDocument(self._neditable.document)
-        else:
-            self._neditable.set_editor(self)
+        if self._neditable is not None:
+            if self._neditable.editor:
+                self.setDocument(self._neditable.document)
+            else:
+                self._neditable.set_editor(self)
+            self._neditable.checkersUpdated.connect(self._highlight_checkers)
 
-        if self._neditable.file_path in settings.BREAKPOINTS:
-            self.breakpoints = settings.BREAKPOINTS[self._neditable.file_path]
-        if self._neditable.file_path in settings.BOOKMARKS:
-            self.bookmarks = settings.BOOKMARKS[self._neditable.file_path]
-        # Add breakpoints
-        for line in self.breakpoints:
-            self.markerAdd(line, self._breakpoint_marker)
-        # Add bookmarks
-        for line in self.bookmarks:
-            self.markerAdd(line, self._bookmark_marker)
+        self.cursorPositionChanged.connect(self._on_cursor_position_changed)
+        self.blockCountChanged.connect(self.update)
 
-        self.connect(
-            self._neditable,
-            SIGNAL("checkersUpdated(PyQt_PyObject)"),
-            self._highlight_checkers)
+        # Mark text changes
+        self._text_change_widget = self.side_widgets.add(
+            text_change_widget.TextChangeWidget)
+        self.show_text_changes(settings.SHOW_TEXT_CHANGES)
+        # Breakpoints/bookmarks widget
+        self._marker_area = self.side_widgets.add(
+            marker_widget.MarkerWidget)
+        # Line number widget
+        self._line_number_widget = self.side_widgets.add(
+            line_number_widget.LineNumberWidget)
+        self.show_line_numbers(settings.SHOW_LINE_NUMBERS)
+        # Code folding
+        self.side_widgets.add(code_folding.CodeFoldingWidget)
 
-    @property
-    def display_name(self):
-        self._neditable.display_name
+        from ninja_ide.gui.editor import intellisense_assistant as ia
+        self._iassistant = None
+        intellisense = IDE.get_service("intellisense")
+        if intellisense is not None:
+            if intellisense.provider_services(self._neditable.language()):
+                self._iassistant = ia.IntelliSenseAssistant(self)
 
     @property
     def nfile(self):
@@ -350,994 +185,735 @@ class Editor(QsciScintilla):
 
     @property
     def is_modified(self):
-        return self.isModified()
+        return self.document().isModified()
 
-    def _configure_keybindings(self):
-        #commands = self.standardCommands()
-        #command = commands.find(QsciCommand.LineDuplicate)
-        #command.setKey()
-        #command.setAlternateKey(0)
-        #print dir(QsciScintilla)
-        self.SendScintilla(QsciScintilla.SCI_ASSIGNCMDKEY,
-                           QsciScintilla.SCI_HOMEDISPLAY, Qt.Key_Home)
+    @property
+    def encoding(self):
+        if self.__encoding is not None:
+            return self.__encoding
+        return "utf-8"
 
-    def on_margin_clicked(self, nmargin, nline, modifiers):
-        position = self.positionFromLineIndex(nline, 0)
-        length = self.lineLength(nline)
+    @encoding.setter
+    def encoding(self, encoding):
+        self.__encoding = encoding
 
-        if nline in self.contractedFolds():
-            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                               self.__indicator_folded)
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE,
-                               position, length)
-            self.markerDelete(nline, self._fold_collapsed_marker)
-            self.markerAdd(nline, self._fold_expanded_marker)
-            self.foldLine(nline)
-            if self._mini:
-                self._mini.fold(nline)
-        elif nline in self.foldable_lines:
-            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                               self.__indicator_folded)
-            self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE,
-                               position, length)
-            self.markerDelete(nline, self._fold_expanded_marker)
-            self.markerAdd(nline, self._fold_collapsed_marker)
-            self.foldLine(nline)
-            if self._mini:
-                self._mini.fold(nline)
-        else:
-            self.handle_bookmarks_breakpoints(nline, modifiers)
+    @property
+    def default_font(self):
+        return self.document().defaultFont()
 
-    def handle_bookmarks_breakpoints(self, line, modifiers):
-        # Breakpoints Default
-        marker = self._breakpoint_marker
-        list_markers = self.breakpoints
-        if modifiers == Qt.ControlModifier:
-            # Bookmarks
-            marker = self._bookmark_marker
-            list_markers = self.bookmarks
+    @default_font.setter
+    def default_font(self, font):
+        super().setFont(font)
+        self._update_tab_stop_width()
 
-        if self.markersAtLine(line) != 0:
-            self.markerDelete(line, marker)
-            list_markers.remove(line)
-        else:
-            self.markerAdd(line, marker)
-            list_markers.append(line)
+    @property
+    def indentation_width(self):
+        return self._indenter.width
 
-        self._save_breakpoints_bookmarks()
+    @property
+    def extra_selections(self):
+        return self._extra_selections
 
-    def _change_indicator_style(self, underline):
-        ncheckers = len(self._neditable.sorted_checkers)
-        indicator_style = QsciScintilla.INDIC_SQUIGGLE
-        if not underline:
-            indicator_style = QsciScintilla.INDIC_STRAIGHTBOX
-        indicator_index = 4
-        for i in range(ncheckers):
-            self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE,
-                               indicator_index, indicator_style)
-            indicator_index += 1
+    @indentation_width.setter
+    def indentation_width(self, width):
+        self._indenter.width = width
+        self._update_tab_stop_width()
 
-    def _save_breakpoints_bookmarks(self):
-        if self.bookmarks and not self._neditable.new_document:
-            settings.BOOKMARKS[self._neditable.file_path] = self.bookmarks
-        elif self._neditable.file_path in settings.BOOKMARKS:
-            settings.BOOKMARKS.pop(self._neditable.file_path)
+    @pyqtSlot()
+    def _on_cursor_position_changed(self):
+        # self.__clear_occurrences()
+        line, col = self.cursor_position
+        self.cursor_position_changed.emit(line, col)
+        if line != self._last_line_position:
+            self._last_line_position = line
+            self.current_line_changed.emit(line)
+        # Create marker for scrollbar
+        self.update_current_line_in_scrollbar(line)
+        # Mark occurrences
+        self._highlight_word_timer.stop()
+        self._highlight_word_timer.start()
 
-        if self.breakpoints and not self._neditable.new_document:
-            settings.BREAKPOINTS[self._neditable.file_path] = self.breakpoints
-        elif self._neditable.file_path in settings.BREAKPOINTS:
-            settings.BREAKPOINTS.pop(self._neditable.file_path)
+    def scrollbar(self):
+        return self._scrollbar
 
-    def _highlight_checkers(self, checkers):
-        checkers = self._neditable.sorted_checkers
-        indicator_index = 4  # Start from 4 (valid), before numbers are used
-        painted_lines = []
+    def insertFromMimeData(self, source):
+        if self.isReadOnly():
+            return
+        text = source.text()
+        if not text:
+            return
+        cursor = self.textCursor()
+        with self:
+            cursor.removeSelectedText()
+            cursor.insertText(text)
+            self.setTextCursor(cursor)
+
+    def update_current_line_in_scrollbar(self, current_line):
+        """Update current line highlight in scrollbar"""
+
+        self._scrollbar.remove_marker('current_line')
+        if self._scrollbar.maximum() > 0:
+            self._scrollbar.add_marker(
+                "current_line", current_line, "white", priority=2)
+
+    def show_line_numbers(self, value):
+        self._line_number_widget.setVisible(value)
+
+    def show_text_changes(self, value):
+        self._text_change_widget.setVisible(value)
+
+    def __clear_occurrences(self):
+        self.__word_occurrences.clear()
+        self._extra_selections.remove("occurrences")
+
+    def highlight_selected_word(self):
+        """Highlight word under cursor"""
+
+        # Clear previous selections
+        self.__clear_occurrences()
+        if self._extra_selections.get("find"):
+            # No re-highlight occurrences when have "find" extra selections
+            return
+
+        word = self.word_under_cursor().selectedText()
+        if not word:
+            return
+
+        results = self._get_find_index_results(word, cs=False, wo=True)[1]
+        selections = []
+        append = selections.append
+        # On very big files where a lots of occurrences can be found,
+        # this freeze the editor during a few seconds. So, we can limit of 500
+        # and make sure the editor will always remain responsive
+        for start_pos, end_pos in results[:500]:
+            selection = extra_selection.ExtraSelection(
+                self.textCursor(),
+                start_pos=start_pos,
+                end_pos=end_pos
+            )
+            color = resources.COLOR_SCHEME.get("editor.occurrence")
+            selection.set_background(color)
+            append(selection)
+            # TODO: highlight results in scrollbar
+            # FIXME: from settings
+            # line = selection.cursor.blockNumber()
+            # Marker = scrollbar.marker
+            # marker = Marker(line, resources.get_color("SearchResult"), 0)
+            # self._scrollbar.add_marker("find", marker)
+        self._extra_selections.add("occurrences", selections)
+
+    def clear_found_results(self):
+        self._scrollbar.remove_marker("find")
+        self._extra_selections.remove("find")
+
+    def highlight_found_results(self, text, cs=False, wo=False):
+        """Highlight all found results from find/replace widget"""
+
+        index, results = self._get_find_index_results(text, cs=cs, wo=wo)
+        selections = []
+        append = selections.append
+        color = resources.COLOR_SCHEME.get("editor.search.result")
+        for start, end in results:
+            selection = extra_selection.ExtraSelection(
+                self.textCursor(),
+                start_pos=start,
+                end_pos=end
+            )
+            selection.set_background(color)
+            selection.set_foreground(utils.get_inverted_color(color))
+            append(selection)
+            line = selection.cursor.blockNumber()
+            self._scrollbar.add_marker("find", line, color)
+        self._extra_selections.add("find", selections)
+
+        return index, len(results)
+
+    def _highlight_checkers(self, neditable):
+        """Add checker selections to the Editor"""
+        # Remove selections if they exists
+        self._extra_selections.remove("checker")
+        self._scrollbar.remove_marker("checker")
+        # Get checkers from neditable
+        checkers = neditable.sorted_checkers
+        selections = []
+        append = selections.append  # Reduce name look-ups for better speed
         for items in checkers:
             checker, color, _ = items
             lines = list(checker.checks.keys())
-            # Set current
-            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                               indicator_index)
-            # Clear
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE,
-                               0, len(self.text()))
-            # Set Color
-            color = color.replace("#", "")
-            self.SendScintilla(QsciScintilla.SCI_INDICSETFORE,
-                               indicator_index, int(color, 16))
-            # Set Style
-            indicator_style = QsciScintilla.INDIC_SQUIGGLE
-            if not settings.UNDERLINE_NOT_BACKGROUND:
-                indicator_style = QsciScintilla.INDIC_STRAIGHTBOX
-            self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE,
-                               indicator_index, indicator_style)
-            # Paint Lines
-            for line in lines:
-                if line in painted_lines:
-                    continue
-                position = self.positionFromLineIndex(line, 0)
-                length = self.lineLength(line)
-                self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE,
-                                   position, length)
-                painted_lines.append(line)
-            indicator_index += 1
+            lines.sort()
+            for line in lines[:self._MAX_CHECKER_SELECTIONS]:
+                cursor = self.textCursor()
+                # Scrollbar marker
+                self._scrollbar.add_marker("checker", line, color, priority=1)
+                ms = checker.checks[line]
+                for (col_start, col_end), _, _ in ms:
+                    selection = extra_selection.ExtraSelection(
+                        cursor,
+                        start_line=line,
+                        col_start=col_start,
+                        col_end=col_end
+                    )
+                    selection.set_underline(color)
+                    append(selection)
+        self._extra_selections.add("checker", selections)
 
-    def cursor_before_focus_lost(self):
-        return self._cursor_line, self._cursor_index
+    def show_indentation_guides(self, value):
+        self._indentation_guides.actived = value
 
-    def load_project_config(self):
-        ninjaide = IDE.get_service('ide')
-        project = ninjaide.get_project_for_file(self._neditable.file_path)
-        if project is not None:
-            self._indent = project.indentation
-            self.useTabs = project.use_tabs
-            self.connect(project, SIGNAL("projectPropertiesUpdated()"),
-                         self.load_project_config)
-            self.additional_builtins = project.additional_builtins
+    def register_extension(self, Extension):
+        extension_instance = Extension()
+        self.__extensions[Extension.name] = extension_instance
+        extension_instance.initialize(self)
+        return extension_instance
+
+    def autocomplete_braces(self, value):
+        self.__autocomplete_braces.actived = value
+
+    def autocomplete_quotes(self, value):
+        self.__autocomplete_quotes.actived = value
+
+    def navigate_bookmarks(self, forward=True):
+        if forward:
+            self._marker_area.next_bookmark()
         else:
-            self._indent = settings.INDENT
-            self.useTabs = settings.USE_TABS
-            self.additional_builtins = None
-        self.setIndentationsUseTabs(self.useTabs)
-        self.setIndentationWidth(self._indent)
-        if self._mini:
-            self._mini.setIndentationsUseTabs(self.useTabs)
-            self._mini.setIndentationWidth(self._indent)
-        self._set_margin_line(settings.MARGIN_LINE)
+            self._marker_area.previous_bookmark()
 
-    def _update_sidebar(self):
-        # Margin 0 is used for line numbers
-        if settings.SHOW_LINE_NUMBERS:
-            self.setMarginWidth(0, '0' * (len(str(self.lines())) + 1))
-        else:
-            self.setMarginWidth(0, 0)
-
-        # Fold
-        self.foldable_lines = []
-        lines = self.lines()
-        for line in range(lines):
-            text = self.text(line)
-            if self.patFold.match(text):
-                self.foldable_lines.append(line)
-                if line in self.contractedFolds():
-                    self.markerDelete(line, self._fold_collapsed_marker)
-                    self.markerDelete(line, self._fold_expanded_marker)
-                    self.markerAdd(line, self._fold_collapsed_marker)
-                else:
-                    self.markerDelete(line, self._fold_collapsed_marker)
-                    self.markerDelete(line, self._fold_expanded_marker)
-                    self.markerAdd(line, self._fold_expanded_marker)
-
-    def _load_minimap(self, show):
-        if show:
-            if self._mini is None:
-                self._mini = minimap.MiniMap(self)
-                # Signals
-                self.SCN_UPDATEUI.connect(self._mini.scroll_map)
-                self.SCN_ZOOM.connect(self._mini.slider.update_position)
-                self._mini.setDocument(self.document())
-                self._mini.setLexer(self.lexer)
-                #FIXME: register syntax
-                self._mini.show()
-            self._mini.adjust_to_parent()
-        elif self._mini is not None:
-            #FIXME: lost doc pointer?
-            self._mini.shutdown()
-            self._mini.deleteLater()
-            self._mini = None
-
-    def _load_docmap(self, show):
-        if show:
-            if self._docmap is None:
-                self._docmap = document_map.DocumentMap(self)
-            self._docmap.initialize()
-        elif self._docmap is not None:
-            self._docmap.deleteLater()
-            self._docmap = None
-    #def __retreat_to_keywords(self, event):
-        #"""Unindent some kind of blocks if needed."""
-        #previous_text = unicode(self.textCursor().block().previous().text())
-        #current_text = unicode(self.textCursor().block().text())
-        #previous_spaces = helpers.get_indentation(previous_text)
-        #current_spaces = helpers.get_indentation(current_text)
-
-        #if len(previous_spaces) < len(current_spaces):
-            #last_word = helpers.get_first_keyword(current_text)
-
-            #if last_word in self.allows_less_indentation:
-                #helpers.clean_line(self)
-
-                #spaces_diff = len(current_spaces) - len(previous_spaces)
-                #self.textCursor().insertText(current_text[spaces_diff:])
-
-    def __get_encoding(self):
-        """Get the current encoding of 'utf-8' otherwise."""
-        if self.__encoding is not None:
-            return self.__encoding
-        return 'utf-8'
-
-    def __set_encoding(self, encoding):
-        """Set the current encoding."""
-        self.__encoding = encoding
-
-    encoding = property(__get_encoding, __set_encoding)
-
-    def set_flags(self):
-        """Set some configuration flags for the Editor."""
-        if settings.ALLOW_WORD_WRAP:
-            self.setWrapMode(QsciScintilla.WrapWord)
-        else:
-            self.setWrapMode(QsciScintilla.WrapNone)
-        self.setMouseTracking(True)
-        if settings.SHOW_TABS_AND_SPACES:
-            self.setWhitespaceVisibility(QsciScintilla.WsVisible)
-        else:
-            self.setWhitespaceVisibility(QsciScintilla.WsInvisible)
-        self.setIndentationGuides(settings.SHOW_INDENTATION_GUIDE)
-        self.setEolVisibility(settings.USE_PLATFORM_END_OF_LINE)
-        self.SendScintilla(QsciScintilla.SCI_SETENDATLASTLINE,
-                           settings.END_AT_LAST_LINE)
-
-    def _update_file_metadata(self):
-        """Update the info of bookmarks, breakpoint and checkers."""
-        new_count = self.lines()
-        if (self.bookmarks or self.breakpoints):
-            line, index = self.getCursorPosition()
-            diference = new_count - self.__lines_count
-            lineNumber = line - abs(diference)
-            contains_text = self.lineLength(line) != 0
-            self._update_sidebar_marks(lineNumber, diference, contains_text)
-        self.__lines_count = new_count
-
-    def _update_sidebar_marks(self, lineNumber, diference, atLineStart=False):
-        if self.breakpoints:
-            self.breakpoints = helpers.add_line_increment(
-                self.breakpoints, lineNumber, diference, atLineStart)
-            if not self._neditable.new_document:
-                settings.BREAKPOINTS[self._neditable.file_path] = \
-                    self._breakpoints
-        if self.bookmarks:
-            self.bookmarks = helpers.add_line_increment(
-                self.bookmarks, lineNumber, diference, atLineStart)
-            if not self._neditable.new_document:
-                settings.BOOKMARKS[self._neditable.file_path] = self._bookmarks
-
-    #def restyle(self, syntaxLang=None):
-        #self.apply_editor_style()
-        #if self.lang == 'python':
-            #parts_scanner, code_scanner, formats = \
-                #syntax_highlighter.load_syntax(python_syntax.syntax)
-            #self.highlighter = syntax_highlighter.SyntaxHighlighter(
-                #self.document(),
-                #parts_scanner, code_scanner, formats, self._neditable)
-            #if self._mini:
-                #self._mini.highlighter = syntax_highlighter.SyntaxHighlighter(
-                    #self._mini.document(), parts_scanner,
-                    #code_scanner, formats)
-            #return
-        #if self.highlighter is None or isinstance(self.highlighter,
-           #highlighter.EmpyHighlighter):
-            #self.highlighter = highlighter.Highlighter(
-                #self.document(),
-                #None, resources.CUSTOM_SCHEME, self.errors, self.pep8,
-                #self.migration)
-        #if not syntaxLang:
-            #ext = file_manager.get_file_extension(self.file_path)
-            #self.highlighter.apply_highlight(
-                #settings.EXTENSIONS.get(ext, 'python'),
-                #resources.CUSTOM_SCHEME)
-            #if self._mini:
-                #self._mini.highlighter.apply_highlight(
-                    #settings.EXTENSIONS.get(ext, 'python'),
-                    #resources.CUSTOM_SCHEME)
-        #else:
-            #self.highlighter.apply_highlight(
-                #syntaxLang, resources.CUSTOM_SCHEME)
-            #if self._mini:
-                #self._mini.highlighter.apply_highlight(
-                    #syntaxLang, resources.CUSTOM_SCHEME)
-        #self._sidebarWidget.repaint()
-
-    #def register_syntax(self, lang='', syntax=None):
-        #self.lang = settings.EXTENSIONS.get(lang, 'python')
-        #sr = IDE.get_service("syntax_registry")
-        #this_syntax = sr.get_syntax_for(self.lang)
-
-        #if this_syntax is not None:
-            #parts_scanner, code_scanner, formats = \
-                #syntax_highlighter.load_syntax(this_syntax)
-            #self.highlighter = syntax_highlighter.SyntaxHighlighter(
-                #self.document(),
-                #parts_scanner, code_scanner, formats, self._neditable)
-            #if self._mini:
-                #self._mini.highlighter = syntax_highlighter.SyntaxHighlighter(
-                    #self._mini.document(), parts_scanner,
-                    #code_scanner, formats, self._neditable)
-
-    def _show_line_numbers(self):
-        self.setMarginsFont(self.__font)
-        # Margin 0 is used for line numbers
-        self.setMarginLineNumbers(0, settings.SHOW_LINE_NUMBERS)
-        self._update_sidebar()
+    def register_syntax_for(self, language="python", force=False):
+        syntax = highlighter.build_highlighter(language)
+        if syntax is not None:
+            self._highlighter = highlighter.SyntaxHighlighter(
+                self.document(),
+                syntax.partition_scanner,
+                syntax.scanners,
+                syntax.context
+            )
 
     def set_font(self, font):
-        self.__font = font
-        self.lexer.setFont(font)
-        self._show_line_numbers()
-        background = resources.CUSTOM_SCHEME.get(
-            'SidebarBackground',
-            resources.COLOR_SCHEME['SidebarBackground'])
-        foreground = resources.CUSTOM_SCHEME.get(
-            'SidebarForeground',
-            resources.COLOR_SCHEME['SidebarForeground'])
-        self.setMarginsBackgroundColor(QColor(background))
-        self.setMarginsForegroundColor(QColor(foreground))
+        """Set font and update tab stop width"""
 
-    def jump_to_line(self, lineno=None):
-        """
-        Jump to a specific line number or ask to the user for the line
-        """
-        if lineno is not None:
-            self.emit(SIGNAL("addBackItemNavigation()"))
-            self._cursor_line = self._cursor_index = -1
-            self.go_to_line(lineno)
-            return
+        super().setFont(font)
+        # self.font_antialiasing(settings.FONT_ANTIALIASING)
+        self.side_widgets.resize()
+        self.side_widgets.update_viewport()
+        self._update_tab_stop_width()
 
-        maximum = self.lines()
-        line = QInputDialog.getInt(self, self.tr("Jump to Line"),
-                                   self.tr("Line:"), 1, 1, maximum, 1)
-        if line[1]:
-            self.emit(SIGNAL("addBackItemNavigation()"))
-            self.go_to_line(line[0] - 1)
+    def _update_tab_stop_width(self):
+        """Update the tab stop width"""
 
-    def _find_occurrences(self):
-        if self.hasSelectedText():
-            word = self.selectedText()
-        else:
-            word = self._text_under_cursor()
-        self.emit(SIGNAL("findOcurrences(QString)"), word)
+        width = self.fontMetrics().width(' ') * self._indenter.width
+        self.setTabStopWidth(width)
 
-    def go_to_line(self, lineno):
-        """
-        Go to an specific line
-        """
-        if self.lines() >= lineno:
-            self.setCursorPosition(lineno, 0)
+    def allow_word_wrap(self, value):
+        wrap_mode = wrap_mode = self.NoWrap
+        if value:
+            wrap_mode = self.WidgetWidth
+        self.setLineWrapMode(wrap_mode)
 
-    def zoom_in(self):
-        self.zoomIn()
+    def font_antialiasing(self, value):
+        font = self.default_font
+        style = font.PreferAntialias
+        if not value:
+            style = font.NoAntialias
+        font.setStyleStrategy(style)
+        self.default_font = font
 
-    def zoom_out(self):
-        self.zoomOut()
-
-    def _set_margin_line(self, margin=None):
-        color_margin = QColor(resources.CUSTOM_SCHEME.get(
-            "MarginLine", resources.COLOR_SCHEME["MarginLine"]))
-        self.setEdgeMode(QsciScintilla.EdgeLine)
-        self.setEdgeColumn(margin)
-        self.setEdgeColor(color_margin)
-
-    def set_cursor_position(self, line, index=0):
-        if self.lines() >= line:
-            self._first_visible_line = line
-            self._cursor_line = self._cursor_index = -1
-            self.setCursorPosition(line, index)
-
-    def add_caret(self):
-        """ Adds additional caret in current position """
-
-        cur_pos = self.SendScintilla(QsciScintilla.SCI_GETCURRENTPOS)
-        if cur_pos not in self.__positions:
-            self.__positions.append(cur_pos)
-
-        # Same position arguments is use for just adding carets
-        # rather than selections.
-        for e, pos in enumerate(self.__positions):
-            if e == 0:
-                # The first selection should be added with SCI_SETSELECTION
-                # and later selections added with SCI_ADDSELECTION
-                self.SendScintilla(QsciScintilla.SCI_CLEARSELECTIONS)
-                self.SendScintilla(QsciScintilla.SCI_SETSELECTION, pos, pos)
-            else:
-                self.SendScintilla(QsciScintilla.SCI_ADDSELECTION, pos, pos)
-
-    def _on_char_added(self):
-        """
-        When char is added, cursors change position. This function obtains
-        new positions and adds them to the list of positions.
-        """
-
-        # For rectangular selection
-        if not self.__positions:
-            return
-        selections = self.SendScintilla(QsciScintilla.SCI_GETSELECTIONS)
-        if selections > 1:
-            for sel in range(selections):
-                new_pos = self.SendScintilla(
-                    QsciScintilla.SCI_GETSELECTIONNCARET, sel)
-                self.__positions[sel] = new_pos
-
-    def indent_less(self):
-        if self.hasSelectedText():
-            self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-            line_from, _, line_to, _ = self.getSelection()
-            for i in range(line_from, line_to):
-                self.unindent(i)
-            self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
-        else:
-            line, _ = self.getCursorPosition()
-            self.unindent(line)
-
-    def indent_more(self):
-        if self.hasSelectedText():
-            self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-            line_from, _, line_to, _ = self.getSelection()
-            for i in range(line_from, line_to):
-                self.indent(i)
-            self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
-        else:
-            line, _ = self.getCursorPosition()
-            self.indent(line)
-
-    def find_match(self, expr, reg, cs, wo, wrap=True, forward=True, line=-1,
-                   index=-1):
-        if self.hasSelectedText():
-            line, index, lto, ito = self.getSelection()
-            index += 1
-        elif line < 0 or index < 0:
-            line, index = self._cursor_line, self._cursor_index
-        found = self.findFirst(expr, reg, cs, wo, wrap, forward, line, index)
-        if found:
-            self.highlight_selected_word(expr, case_sensitive=cs)
-            return self._get_find_index_result(expr, cs, wo)
-        else:
-            return 0, 0
-
-    def _get_find_index_result(self, expr, cs, wo):
-        text = self.text()
-        hasSearch = len(expr) > 0
-        current_index = 0
-        if wo:
-            pattern = r'\b%s\b' % expr
-            temp_text = ' '.join(re.findall(pattern, text, re.IGNORECASE))
-            text = temp_text if temp_text != '' else text
-
-        if cs:
-            search = expr
-            totalMatches = text.count(expr)
-        else:
-            text = text.lower()
-            search = expr.lower()
-            totalMatches = text.count(search)
-        if hasSearch and totalMatches > 0:
-            line, index, lto, ito = self.getSelection()
-            position = self.positionFromLineIndex(line, index)
-
-            current_index = text[:position].count(search)
-            if current_index <= totalMatches:
-                index = current_index
-            else:
-                index = text.count(search) + 1
-        else:
-            index = 0
-            totalMatches = 0
-        return current_index + 1, totalMatches
-
-    def replace_match(self, wordOld, wordNew, allwords=False, selection=False):
-        """Find if searched text exists and replace it with new one.
-        If there is a selection just do it inside it and exit.
-        """
-        if selection and self.hasSelectedText():
-            lstart, istart, lend, iend = self.getSelection()
-            text = self.selectedText()
-            max_replace = -1  # all
-            text = text.replace(wordOld, wordNew, max_replace)
-            self.replaceSelectedText(text)
-            return
-
-        self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-        line, index, lto, ito = self.getSelection()
-        self.replace(wordNew)
-
-        while allwords:
-            result = self.findNext()
-
-            if result:
-                self.replace(wordNew)
-            else:
-                break
-
-        if allwords:
-            self.setCursorPosition(line, index)
-        self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip:
+            pos = event.pos()
+            tc = self.cursorForPosition(pos)
+            block = tc.block()
+            line = block.layout().lineForTextPosition(tc.positionInBlock())
+            if line.isValid():
+                if pos.x() <= self.blockBoundingRect(block).left() + \
+                        line.naturalTextRect().right():
+                    column = tc.positionInBlock()
+                    line = self.line_from_position(pos.y())
+                    checkers = self._neditable.sorted_checkers
+                    for items in checkers:
+                        checker, _, _ = items
+                        messages_for_line = checker.message(line)
+                        if messages_for_line is not None:
+                            for (start, end), message, content in \
+                                    messages_for_line:
+                                if column >= start and column <= end:
+                                    QToolTip.showText(
+                                        self.mapToGlobal(pos), message, self)
+                    return True
+                QToolTip.hideText()
+        return super().viewportEvent(event)
 
     def focusInEvent(self, event):
-        super(Editor, self).focusInEvent(event)
-        self.emit(SIGNAL("editorFocusObtained()"))
-        selected = False
-        if self.hasSelectedText():
-            selected = True
-            line, index, lto, ito = self.getSelection()
-        else:
-            line, index = self._cursor_line, self._cursor_index
-        if line != -1:
-            self.setCursorPosition(line, index)
-        if selected:
-            self.setSelection(line, index, lto, ito)
-        self.SendScintilla(QsciScintilla.SCI_SETFIRSTVISIBLELINE,
-                           self._first_visible_line)
-
-    def focusOutEvent(self, event):
-        """Hide Popup on focus lost."""
-        #self.completer.hide_completer()
-        self._first_visible_line = int(
-            self.SendScintilla(QsciScintilla.SCI_GETFIRSTVISIBLELINE))
-        self._cursor_line, self._cursor_index = self.getCursorPosition()
-        super(Editor, self).focusOutEvent(event)
-
-    def resizeEvent(self, event):
-        super(Editor, self).resizeEvent(event)
-        if self._mini:
-            self._mini.adjust_to_parent()
-        if self._docmap:
-            self._docmap.adjust()
-
-    def __backspace(self, event):
-        if self.hasSelectedText():
-            return False
-        line, index = self.getCursorPosition()
-        text = self.text(line)
-        if index < len(text):
-            char = text[index - 1]
-            next_char = text[index]
-
-            if (char in settings.BRACES and
-                    next_char in settings.BRACES.values()) \
-                    or (char in settings.QUOTES and
-                        next_char in settings.QUOTES.values()):
-                self.setSelection(line, index - 1, line, index)
-                self.removeSelectedText()
-
-    def __ignore_extended_line(self, event):
-        if event.modifiers() == Qt.ShiftModifier:
-            return True
-
-    def __reverse_select_text_portion_from_offset(self, begin, end):
-        """Backwards select text, go from current+begin to current - end
-        possition, returns text"""
-        line, index = self.getCursorPosition()
-        text = self.text(line)
-        cursor_position = index
-        #QT silently fails on invalid position, ergo breaks when EOF < begin
-        while ((index + begin) == index) and begin > 0:
-            begin -= 1
-            index = cursor_position + begin
-        return text[index:cursor_position - end]
-
-    def __quot_completion(self, event):
-        """Indicate if this is some sort of quote that needs to be completed
-        This is a very simple boolean table, given that quotes are a
-        simmetrical symbol, is a little more cumbersome guessing the completion
-        table.
-        """
-        text = event.text()
-        line, index = self.getCursorPosition()
-        PENTA_Q = 5 * text
-        TETRA_Q = 4 * text
-        TRIPLE_Q = 3 * text
-        DOUBLE_Q = 2 * text
-        supress_echo = False
-        pre_context = self.__reverse_select_text_portion_from_offset(0, 3)
-        pos_context = self.__reverse_select_text_portion_from_offset(3, 0)
-        if pre_context == pos_context == TRIPLE_Q:
-            supress_echo = True
-        elif pos_context[:2] == DOUBLE_Q:
-            pre_context = self.__reverse_select_text_portion_from_offset(0, 4)
-            if pre_context == TETRA_Q:
-                supress_echo = True
-        elif pos_context[:1] == text:
-            pre_context = self.__reverse_select_text_portion_from_offset(0, 5)
-            if pre_context == PENTA_Q:
-                supress_echo = True
-            elif pre_context[-1] == text:
-                supress_echo = True
-        if supress_echo:
-            line, index = self.getCursorPosition()
-            self.setCursorPosition(line, index + 1)
-        return supress_echo
-
-    def __brace_completion(self, event):
-        """Indicate if this symbol is part of a given pair and needs to be
-        completed.
-        """
-        text = event.text()
-        if text in list(settings.BRACES.values()):
-            line, index = self.getCursorPosition()
-            line_text = self.text(line)
-            portion = line_text[index - 1:index + 1]
-            brace_open = portion[0]
-            brace_close = (len(portion) > 1) and portion[1] or None
-            balance = BRACE_DICT.get(brace_open, None) == text == brace_close
-            if balance:
-                self.setCursorPosition(line, index + 1)
-                return True
-
-    def __auto_indent(self, event):
-        line, index = self.getCursorPosition()
-        text = self.text(line - 1).strip()
-        symbols_to_look = tuple(settings.BRACES.keys()) + (",",)
-        if text and text[-1] in symbols_to_look:
-            symbol = " " * self._indent
-            if self.useTabs:
-                symbol = "\t"
-            self.insertAt(symbol, line, index)
-            self.setCursorPosition(line, index + self._indent)
-        if settings.COMPLETE_DECLARATIONS and text and text[-1] == ":":
-            helpers.check_for_assistance_completion(self, text)
-
-    def complete_declaration(self):
-        settings.COMPLETE_DECLARATIONS = not settings.COMPLETE_DECLARATIONS
-        self.insert_new_line()
-        settings.COMPLETE_DECLARATIONS = not settings.COMPLETE_DECLARATIONS
-
-    def insert_new_line(self):
-        line, index = self.getCursorPosition()
-        length = self.lineLength(line) - 1
-        at_block_end = index == length
-        self.insertAt("\n", line, length)
-        if not at_block_end:
-            length = self.lineLength(line + 1)
-            self.setCursorPosition(line + 1, length)
-        self.__auto_indent(None)
-
-    def __complete_braces(self, event):
-        """Complete () [] and {} using a mild inteligence to see if corresponds
-        and also do some more magic such as complete in classes and functions.
-        """
-        brace = event.text()
-        if brace not in settings.BRACES:
-            # Thou shalt not waste cpu cycles if this brace compleion dissabled
-            return
-        line, index = self.getCursorPosition()
-        text = self.text(line)
-        complementary_brace = BRACE_DICT.get(brace)
-        token_buffer = []
-        _, tokens = self.__tokenize_text(text)
-        is_unbalance = 0
-        for tkn_type, tkn_rep, tkn_begin, tkn_end in tokens:
-            if tkn_rep == brace:
-                is_unbalance += 1
-            elif tkn_rep == complementary_brace:
-                is_unbalance -= 1
-            if tkn_rep.strip() != "":
-                token_buffer.append((tkn_rep, tkn_end[1]))
-            is_unbalance = (is_unbalance >= 0) and is_unbalance or 0
-
-        if (self.lang == "python") and (len(token_buffer) == 3) and \
-                (token_buffer[2][0] == brace) and (token_buffer[0][0] in
-                                                   ("def", "class")):
-            self.insertAt("):", line, index)
-            #are we in presence of a function?
-            #TODO: IMPROVE THIS AND GENERALIZE IT WITH INTELLISENSEI
-            if token_buffer[0][0] == "def":
-                symbols_handler = handlers.get_symbols_handler('py')
-                split_source = self.text().split("\n")
-                indent = re.match('^\s+', str(split_source[line]))
-                indentation = (indent.group() + " " * self._indent
-                               if indent is not None else " " * self._indent)
-                new_line = "%s%s" % (indentation, 'pass')
-                split_source.insert(line + 1, new_line)
-                source = '\n'.join(split_source)
-                source = source.encode(self.encoding)
-                _, symbols_simplified = symbols_handler.obtain_symbols(
-                    source, simple=True, only_simple=True)
-                symbols_index = sorted(symbols_simplified.keys())
-                symbols_simplified = sorted(
-                    list(symbols_simplified.items()), key=lambda x: x[0])
-                index_symbol = bisect.bisect(symbols_index, line)
-                if (index_symbol >= len(symbols_index) or
-                        symbols_index[index_symbol] > (line + 1)):
-                    index -= 1
-                belongs_to_class = symbols_simplified[index_symbol][1][2]
-                if belongs_to_class:
-                    self.insertAt("self", line, index)
-                    index += 4
-                    if self.selected_text != "":
-                        self.insertAt(", ", line, index)
-                        index += 2
-            self.insertAt(self.selected_text, line, index)
-            self.setCursorPosition(line, index)
-        elif (token_buffer and (not is_unbalance) and
-              self.selected_text):
-            self.insertAt(self.selected_text, line, index)
-        elif is_unbalance:
-            next_char = text[index:index + 1].strip()
-            if self.selected_text or next_char == "":
-                self.insertAt(complementary_brace, line, index)
-                self.insertAt(self.selected_text, line, index)
-
-    def __complete_quotes(self, event):
-        """
-        Completion for single and double quotes, which since are simmetrical
-        symbols used for different things can not be balanced as easily as
-        braces or equivalent.
-        """
-        line, index = self.getCursorPosition()
-        symbol = event.text()
-        if symbol in settings.QUOTES:
-            pre_context = self.__reverse_select_text_portion_from_offset(0, 3)
-            if pre_context == 3 * symbol:
-                self.insertAt(3 * symbol, line, index)
-            else:
-                self.insertAt(symbol, line, index)
-            self.insertAt(self.selected_text, line, index)
-
-    def clear_additional_carets(self):
-        reset_pos = self.SendScintilla(QsciScintilla.SCI_GETCURRENTPOS)
-        self.__positions = []
-        self.SendScintilla(QsciScintilla.SCI_CLEARSELECTIONS)
-        self.SendScintilla(QsciScintilla.SCI_SETSELECTION,
-                           reset_pos, reset_pos)
-
-    def keyPressEvent(self, event):
-        #Completer pre key event
-        #if self.completer.process_pre_key_event(event):
-            #return
-        #On Return == True stop the execution of this method
-        if self.preKeyPress.get(event.key(), lambda x: False)(event):
-            #emit a signal so that plugins can do their thing
-            self.emit(SIGNAL("keyPressEvent(QEvent)"), event)
-            return
-        self.selected_text = self.selectedText()
-
-        self._check_auto_copy_cut(event)
-        # Clear additional carets if undo
-        undo = event.matches(QKeySequence.Undo)
-        if undo and self.__positions:
-            self.clear_additional_carets()
-
-        super(Editor, self).keyPressEvent(event)
-        if event.key() == Qt.Key_Escape:
-            self.clear_additional_carets()
-        elif event.key() in (Qt.Key_Left, Qt.Key_Right,
-                             Qt.Key_Up, Qt.Key_Down):
-            if self.__positions:
-                self.clear_additional_carets()
-
-        if event.modifiers() == Qt.AltModifier:
-            cur_pos = self.SendScintilla(QsciScintilla.SCI_GETCURRENTPOS)
-            if not self.__positions:
-                self.__positions = [cur_pos]
-
-        self.postKeyPress.get(event.key(), lambda x: False)(event)
-
-        #Completer post key event
-        #self.completer.process_post_key_event(event)
-
-        #emit a signal so that plugins can do their thing
-        self.emit(SIGNAL("keyPressEvent(QEvent)"), event)
-
-    def keyReleaseEvent(self, event):
-        super(Editor, self).keyReleaseEvent(event)
-        line, _ = self.getCursorPosition()
-        if line != self._last_block_position:
-            self._last_block_position = line
-            self.emit(SIGNAL("currentLineChanged(int)"), line)
-
-    def _check_auto_copy_cut(self, event):
-        """Convenience method, when the user hits Ctrl+C or
-        Ctrl+X with no text selected, we automatically select
-        the entire line under the cursor."""
-        copyOrCut = event.matches(QKeySequence.Copy) or \
-            event.matches(QKeySequence.Cut)
-        if copyOrCut and not self.hasSelectedText():
-            line, index = self.getCursorPosition()
-            length = self.lineLength(line)
-            self.setSelection(line, 0, line, length)
-
-    def _text_under_cursor(self):
-        line, index = self.getCursorPosition()
-        word = self.wordAtLineIndex(line, index)
-        result = self._patIsWord.findall(word)
-        word = result[0] if result else ''
-        return word
-
-    def wheelEvent(self, event, forward=True):
-        if event.modifiers() == Qt.ControlModifier:
-            if event.delta() > 0:
-                self.zoom_in()
-            elif event.delta() < 0:
-                self.zoom_out()
-            event.ignore()
-        super(Editor, self).wheelEvent(event)
-
-    def contextMenuEvent(self, event):
-        popup_menu = self.createStandardContextMenu()
-
-        menu_lint = QMenu(self.tr("Ignore Lint"))
-        ignoreLineAction = menu_lint.addAction(
-            self.tr("Ignore This Line"))
-        ignoreSelectedAction = menu_lint.addAction(
-            self.tr("Ignore Selected Area"))
-        self.connect(ignoreLineAction, SIGNAL("triggered()"),
-                     lambda: helpers.lint_ignore_line(self))
-        self.connect(ignoreSelectedAction, SIGNAL("triggered()"),
-                     lambda: helpers.lint_ignore_selection(self))
-        popup_menu.insertSeparator(popup_menu.actions()[0])
-        popup_menu.insertMenu(popup_menu.actions()[0], menu_lint)
-        popup_menu.insertAction(popup_menu.actions()[0],
-                                self.__actionFindOccurrences)
-        #add extra menus (from Plugins)
-        #lang = file_manager.get_file_extension(self.file_path)
-        #extra_menus = self.EXTRA_MENU.get(lang, None)
-        #if extra_menus:
-            #popup_menu.addSeparator()
-            #for menu in extra_menus:
-                #popup_menu.addMenu(menu)
-        #show menu
-        popup_menu.exec_(event.globalPos())
-
-    def mouseMoveEvent(self, event):
-        position = event.pos()
-        line = self.lineAt(position)
-        checkers = self._neditable.sorted_checkers
-        for items in checkers:
-            checker, color, _ = items
-            message = checker.message(line)
-            if message:
-                QToolTip.showText(self.mapToGlobal(position), message, self)
-        if event.modifiers() == Qt.ControlModifier:
-            self._navigation_highlight_active = True
-            word = self.wordAtPoint(position)
-
-            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                               self.__indicator_navigation)
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE,
-                               0, len(self.text()))
-            text = self.text()
-            word_length = len(word)
-            index = text.find(word)
-            while index != -1:
-                self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE,
-                                   index, word_length)
-                index = text.find(word, index + 1)
-        elif self._navigation_highlight_active:
-            self._navigation_highlight_active = False
-            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                               self.__indicator_navigation)
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE,
-                               0, len(self.text()))
-        super(Editor, self).mouseMoveEvent(event)
-
-    def mousePressEvent(self, event):
-        #if self.completer.isVisible():
-            #self.completer.hide_completer()
-        super(Editor, self).mousePressEvent(event)
-        if event.modifiers() == Qt.ControlModifier:
-            self.go_to_definition()
-        elif event.modifiers() == Qt.AltModifier:
-            self.add_caret()
-        else:
-            self.clear_additional_carets()
-
-        line, _ = self.getCursorPosition()
-        if line != self._last_block_position:
-            self._last_block_position = line
-            self.emit(SIGNAL("currentLineChanged(int)"), line)
-
-    # def mouseReleaseEvent(self, event):
-        # super(Editor, self).mouseReleaseEvent(event)
-        # if event.button() == Qt.LeftButton:
-        #    self.highlight_selected_word()
+        super().focusInEvent(event)
+        if event.reason() == Qt.MouseFocusReason:
+            self.editorFocusObtained.emit()
 
     def dropEvent(self, event):
-        if len(event.mimeData().urls()) > 0:
-            path = event.mimeData().urls()[0].path()
-            self.emit(SIGNAL("openDropFile(QString)"), path)
-            event.ignore()
-            event.mimeData = QMimeData()
-        super(Editor, self).dropEvent(event)
-        self.undo()
+        if event.type() == Qt.ControlModifier and self.has_selection:
+            insertion_cursor = self.cursorForPosition(event.pos())
+            insertion_cursor.insertText(self.selected_text())
+        else:
+            super().dropEvent(event)
 
-    def go_to_definition(self):
-        line, index = self.getCursorPosition()
-        word = self.wordAtLineIndex(line, index)
-        text = self.text(line)
-        brace_pos = text.find("(", index)
-        back_text = text[:index]
-        dot_pos = back_text.rfind(".")
-        prop_pos = back_text.rfind("@")
-        is_function = (brace_pos != -1 and
-                       text[index:brace_pos + 1] in ("%s(" % word))
-        is_attribute = (dot_pos != -1 and
-                        text[dot_pos:index] in (".%s" % word))
-        is_property = (prop_pos != -1 and
-                       text[prop_pos:index] in ("@%s" % word))
-        if is_function or is_property:
-            self.emit(SIGNAL("locateFunction(QString, QString, bool)"),
-                      word, self.file_path, False)
-        elif is_attribute:
-            self.emit(SIGNAL("locateFunction(QString, QString, bool)"),
-                      word, self.file_path, True)
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self.painted.emit(event)
 
-    def __tokenize_text(self, text):
-        invalid_syntax = False
-        token_buffer = []
-        try:
-            for tkn_type, tkn_rep, tkn_begin, tkn_end, _ in \
-                    generate_tokens(StringIO(text).readline):
-                token_buffer.append((tkn_type, tkn_rep, tkn_begin, tkn_end))
-        except (TokenError, IndentationError, SyntaxError):
-            invalid_syntax = True
-        return (invalid_syntax, token_buffer)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.side_widgets.resize()
+        self.side_widgets.update_viewport()
+        self.adjust_scrollbar_ranges()
 
-    def highlight_selected_word(self, word_find=None, case_sensitive=True,
-                                reset=False):
-        """Highlight selected variable"""
-        self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT,
-                           self.__indicator_word)
-        word = self._text_under_cursor()
-        if word_find is not None:
-            word = word_find
+    def __smart_backspace(self):
+        accepted = False
+        cursor = self.textCursor()
+        text_before_cursor = self.text_before_cursor(cursor)
+        text = cursor.block().text()
+        indentation = self._indenter.text()
+        space_at_start_len = len(text) - len(text.lstrip())
+        column_number = cursor.positionInBlock()
+        if text_before_cursor.endswith(indentation) and \
+                space_at_start_len == column_number and \
+                not cursor.hasSelection():
+            to_remove = len(text_before_cursor) % len(indentation)
+            if to_remove == 0:
+                to_remove = len(indentation)
+            cursor.setPosition(cursor.position() - to_remove,
+                               QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            accepted = True
+        return accepted
 
-        if word != self._selected_word and not reset:
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE, 0,
-                               len(self.text()))
-            self._selected_word = word
-            word_length = len(self._selected_word)
-            text = self.text()
-            search = self._selected_word
-            if not case_sensitive:
-                search = search.lower()
-                text = text.lower()
-            index = text.find(search)
-            self.search_lines = []  # Restore search lines
-            appendLine = self.search_lines.append
-            while index != -1 and word:
-                line = self.SendScintilla(QsciScintilla.SCI_LINEFROMPOSITION,
-                                          index)
-                if line not in self.search_lines:
-                    appendLine(line)
-                self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE,
-                                   index, word_length)
-                index = text.find(search, index + 1)
-            #FIXME:
-            if self._docmap is not None:
-                self._docmap.update()
-        elif ((word == self._selected_word) and (word_find is None)) or reset:
-            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE, 0,
-                               len(self.text()))
-            self._selected_word = None
+    def __manage_key_home(self, event):
+        """Performs home key action"""
+        cursor = self.textCursor()
+        indent = self.line_indent()
+        # For selection
+        move = QTextCursor.MoveAnchor
+        if event.modifiers() == Qt.ShiftModifier:
+            move = QTextCursor.KeepAnchor
+        # Operation
+        if cursor.positionInBlock() == indent:
+            cursor.movePosition(QTextCursor.StartOfBlock, move)
+        elif cursor.atBlockStart():
+            cursor.setPosition(cursor.block().position() + indent, move)
+        elif cursor.positionInBlock() > indent:
+            cursor.movePosition(QTextCursor.StartOfLine, move)
+            cursor.setPosition(cursor.block().position() + indent, move)
+        self.setTextCursor(cursor)
+        event.accept()
 
-    def to_upper(self):
-        self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-        if self.hasSelectedText():
-            text = self.selectedText().upper()
-            self.replaceSelectedText(text)
-        self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
+    def is_keyword(self, text):
+        import keyword
+        return text in keyword.kwlist
 
-    def to_lower(self):
-        self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-        if self.hasSelectedText():
-            text = self.selectedText().lower()
-            self.replaceSelectedText(text)
-        self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.modifiers() == Qt.ControlModifier:
+            if event.button() == Qt.LeftButton:
+                if self.__link_pressed:
+                    cursor = self.cursorForPosition(event.pos())
+                    self._go_to_definition_requested(cursor)
 
-    def to_title(self):
-        self.SendScintilla(QsciScintilla.SCI_BEGINUNDOACTION, 1)
-        if self.hasSelectedText():
-            text = self.selectedText().title()
-            self.replaceSelectedText(text)
-        self.SendScintilla(QsciScintilla.SCI_ENDUNDOACTION, 1)
+    def _go_to_definition_requested(self, cursor):
+        text = self.word_under_cursor(cursor).selectedText()
+        # self._iassistant.definitions(text)
+        if text and not self.inside_string_or_comment(cursor):
+            self._iassistant.invoke("definitions")
+
+    def _update_link(self, mouse_event):
+        if mouse_event.modifiers() == Qt.ControlModifier:
+            cursor = self.cursorForPosition(mouse_event.pos())
+            text = self.word_under_cursor(cursor).selectedText()
+            if self.inside_string_or_comment(cursor) or self.is_keyword(text):
+                return
+            if not text:
+                self.clear_link()
+                return
+            self.show_link(cursor)
+            self.viewport().setCursor(Qt.PointingHandCursor)
+            return
+
+        self.clear_link()
+
+    def show_link(self, cursor):
+        start_s, end_s = cursor.selectionStart(), cursor.selectionEnd()
+        selection = extra_selection.ExtraSelection(
+            cursor,
+            start_pos=start_s,
+            end_pos=end_s
+        )
+        link_color = resources.COLOR_SCHEME.get("editor.link.navigate")
+        selection.set_underline(link_color, style=1)
+        selection.set_foreground(link_color)
+        self._extra_selections.add("link", selection)
+        self.__link_pressed = True
+
+    def clear_link(self):
+        self._extra_selections.remove("link")
+        self.viewport().setCursor(Qt.IBeamCursor)
+        self.__link_pressed = False
+
+    def wheelEvent(self, event):
+        # Avoid scrolling the editor when the completions view is displayed
+        if self._iassistant is not None:
+            if self._iassistant._proposal_widget is not None:
+                if not self._iassistant._proposal_widget.isVisible():
+                    super().wheelEvent(event)
+            else:
+                super().wheelEvent(event)
+        else:
+            super().wheelEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._highlighter is not None:
+            self._update_link(event)
+        # Restore mouse cursor if settings say hide while typing
+        if self.viewport().cursor().shape() == Qt.BlankCursor:
+            self.viewport().setCursor(Qt.IBeamCursor)
+        super(NEditor, self).mouseMoveEvent(event)
+
+    def is_modifier(self, key_event):
+        key = key_event.key()
+        modifiers = (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Meta, Qt.Key_Alt)
+        if key in modifiers:
+            return True
+        return False
+
+    def keyReleaseEvent(self, event):
+        self.keyReleased.emit(event)
+        if event.key() == Qt.Key_Control:
+            self.clear_link()
+        super().keyReleaseEvent(event)
+
+    def show_tooltip(self, text, position, duration=1000 * 60):
+        QToolTip.showText(position, text, self, self.rect(), duration)
+
+    def hide_tooltip(self):
+        QToolTip.hideText()
+
+    def current_color(self, cursor=None):
+        """Get the sintax highlighting color for the current QTextCursor"""
+
+        if cursor is None:
+            cursor = self.textCursor()
+        block = cursor.block()
+        pos = cursor.position() - block.position()
+        layout = block.layout()
+        block_formats = layout.additionalFormats()
+        if block_formats:
+            if cursor.atBlockEnd():
+                current_format = block_formats[-1].format
+            else:
+                current_format = None
+                for fmt in block_formats:
+                    if (pos >= fmt.start) and (pos < fmt.start + fmt.length):
+                        current_format = fmt.format
+                if current_format is None:
+                    return None
+            color = current_format.foreground().color().name()
+            return color
+        else:
+            return None
+
+    def inside_string_or_comment(self, cursor=None):
+        """Check if the cursor is inside a comment or string"""
+        if self._highlighter is None:
+            return False
+        if cursor is None:
+            cursor = self.textCursor()
+        current_color = self.current_color(cursor)
+        colors = []
+        for k, v in self._highlighter.formats.items():
+            if k.startswith("comment") or k.startswith("string"):
+                colors.append(v.foreground().color().name())
+        if current_color in colors:
+            return True
+        return False
+
+    def _complete_declaration(self):
+        if not self.neditable.language() == "python":
+            return
+        line, _ = self.cursor_position
+        line_text = self.line_text(line - 1).strip()
+        pat_class = re.compile("(\\s)*class.+\\:$")
+        if pat_class.match(line_text):
+            cursor = self.textCursor()
+            block = cursor.block()
+            init = False
+            while block.isValid():
+                text = block.text().strip()
+                if text and text.startswith("def __init__(self"):
+                    init = True
+                    break
+                block = block.next()
+            if init:
+                return
+            class_name = [name for name in
+                          re.split("(\\s)*class(\\s)+|:|\(", line_text)
+                          if name is not None and name.strip()][0]
+
+            line, col = self.cursor_position
+            indentation = self.line_indent(line) * " "
+            init_def = "def __init__(self):"
+            definition = "\n{}{}\n{}".format(
+                indentation, init_def, indentation * 2
+            )
+            super_include = ""
+            if line_text.find("(") != -1:
+                classes = line_text.split("(")
+                parents = []
+                if len(classes) > 1:
+                    parents += classes[1].split(",")
+                if len(parents) > 0 and "object):" not in parents:
+                    super_include = "super({}, self).__init__()".format(
+                        class_name)
+                    definition = "\n{}{}\n{}{}\n{}".format(
+                        indentation, init_def, indentation * 2,
+                        super_include, indentation * 2
+                    )
+            self.insert_text(definition)
+
+    def keyPressEvent(self, event):
+        if not self.is_modifier(event) and settings.HIDE_MOUSE_CURSOR:
+            self.viewport().setCursor(Qt.BlankCursor)
+        if self.isReadOnly():
+            return
+        text = event.text()
+        if text:
+            self.__clear_occurrences()
+        event.ignore()
+        # Emit a signal then plugins can do something
+        self.keyPressed.emit(event)
+        if event.matches(QKeySequence.InsertParagraphSeparator):
+            cursor = self.textCursor()
+            if not self.inside_string_or_comment(cursor):
+                self._indenter.indent_block(self.textCursor())
+                self._complete_declaration()
+                return
+        if event.key() == Qt.Key_Home:
+            self.__manage_key_home(event)
+            return
+        elif event.key() == Qt.Key_Tab:
+            if self.textCursor().hasSelection():
+                self._indenter.indent_selection()
+            else:
+                self._indenter.indent()
+            event.accept()
+        elif event.key() == Qt.Key_Backspace:
+            if not event.isAccepted():
+                if self.__smart_backspace():
+                    event.accept()
+        if not event.isAccepted():
+            super().keyPressEvent(event)
+        # Post key press
+        self.postKeyPressed.emit(event)
+
+        # TODO: generalize it with triggers
+        # TODO: shortcut
+        # force_completion = ctrl and event.key() == Qt.Key_Space
+        # if event.key() == Qt.Key_Period or force_completion:
+        #     if not self.inside_string_or_comment():
+        #         self._intellisense.invoke_completion()
+        #         self._intellisense.process("completions")
+
+    def adjust_scrollbar_ranges(self):
+        line_spacing = QFontMetrics(self.font()).lineSpacing()
+        if line_spacing == 0:
+            return
+        offset = self.contentOffset().y()
+        self._scrollbar.set_visible_range(
+            (self.viewport().rect().height() - offset) / line_spacing)
+        self._scrollbar.set_range_offset(offset / line_spacing)
+
+    def _get_find_index_results(self, expr, cs, wo):
+
+        text = self.text
+        current_index = 0
+
+        if not cs:
+            text = text.lower()
+            expr = expr.lower()
+
+        expr = re.escape(expr)
+        if wo:
+            expr = r"\b" + re.escape(expr) + r"\b"
+
+        def find_all_iter(string, sub):
+            try:
+                reobj = re.compile(sub)
+            except sre_constants.error:
+                return
+            for match in reobj.finditer(string):
+                yield match.span()
+
+        matches = list(find_all_iter(text, expr))
+
+        if len(matches) > 0:
+            position = self.textCursor().position()
+            current_index = sum(1 for _ in re.finditer(expr, text[:position]))
+        return current_index, matches
+
+    def show_run_cursor(self):
+        """Highlight momentarily a piece of code"""
+
+        cursor = self.textCursor()
+        if self.has_selection():
+            # Get selection range
+            start_pos, end_pos = cursor.selectionStart(), cursor.selectionEnd()
+        else:
+            # If no selected text, highlight current line
+            cursor.movePosition(QTextCursor.StartOfLine)
+            start_pos = cursor.position()
+            cursor.movePosition(QTextCursor.EndOfLine)
+            end_pos = cursor.position()
+        # Create extra selection
+        selection = extra_selection.ExtraSelection(
+            cursor,
+            start_pos=start_pos,
+            end_pos=end_pos
+        )
+        selection.set_background("gray")
+        self._extra_selections.add("run_cursor", selection)
+        # Clear selection for show correctly the extra selection
+        cursor.clearSelection()
+        self.setTextCursor(cursor)
+        # Remove extra selection after 0.3 seconds
+        QTimer.singleShot(
+            300, lambda: self._extra_selections.remove("run_cursor"))
+
+    def link(self, clone):
+        """Links the clone with its original"""
+        # TODO: errro en compute indent
+        clone.cursor_position = self.cursor_position
+        for kind, selections in self._extra_selections.items():
+            clone._extra_selections.add(kind, selections)
+        # clone.setDocument(self.document())
+        clone.scrollbar().link(self._scrollbar)
+
+    def comment_or_uncomment(self):
+        cursor = self.textCursor()
+        doc = self.document()
+        block_start = doc.findBlock(cursor.selectionStart())
+        block_end = doc.findBlock(cursor.selectionEnd()).next()
+        key = self.neditable.language()
+        card = settings.SYNTAX[key].get("comment", [])[0]
+        has_selection = self.has_selection()
+        lines_commented = 0
+        lines_without_comment = 0
+        with self:
+            # Save blocks for use later
+            temp_start, temp_end = block_start, block_end
+            min_indent = sys.maxsize
+            comment = True
+            card_lenght = len(card)
+            # Get operation (comment/uncomment) and the minimum indent
+            # of selected lines
+            while temp_start != temp_end:
+                block_number = temp_start.blockNumber()
+                indent = self.line_indent(block_number)
+                block_text = temp_start.text().lstrip()
+                if not block_text:
+                    temp_start = temp_start.next()
+                    continue
+                min_indent = min(indent, min_indent)
+                if block_text.startswith(card):
+                    lines_commented += 1
+                    comment = False
+                elif block_text.startswith(card.strip()):
+                    lines_commented += 1
+                    comment = False
+                    card_lenght -= 1
+                else:
+                    lines_without_comment += 1
+                    comment = True
+                temp_start = temp_start.next()
+
+            total_lines = lines_commented + lines_without_comment
+            if lines_commented > 0 and lines_commented != total_lines:
+                comment = True
+            # Comment/uncomment blocks
+            while block_start != block_end:
+                cursor.setPosition(block_start.position())
+                cursor.movePosition(QTextCursor.StartOfLine)
+                cursor.movePosition(QTextCursor.Right,
+                                    QTextCursor.MoveAnchor, min_indent)
+                if block_start.text().lstrip():
+                    if comment:
+                        cursor.insertText(card)
+                    else:
+                        cursor.movePosition(QTextCursor.Right,
+                                            QTextCursor.KeepAnchor,
+                                            card_lenght)
+                        cursor.removeSelectedText()
+                block_start = block_start.next()
+
+            if not has_selection:
+                cursor.movePosition(QTextCursor.Down)
+                self.setTextCursor(cursor)
 
 
-def create_editor(neditable):
-    #has_editor = neditable.editor is not None
-    editor = Editor(neditable)
-    #ext = neditable.nfile.file_ext()
-    #if not has_editor or syntax:
-        #editor.register_syntax(ext, syntax)
-    #else:
-        #editor.highlighter = neditable.editor.highlighter
+class ExtraSelectionManager(object):
 
-    return editor
+    def __init__(self, neditor):
+        self._neditor = neditor
+        self.__selections = OrderedDict()
+
+    def __len__(self):
+        return len(self.__selections)
+
+    def __iter__(self):
+        return iter(self.__selections)
+
+    def __getitem__(self, kind):
+        return self.__selections[kind]
+
+    def get(self, kind):
+        return self.__selections.get(kind, [])
+
+    def add(self, kind, selection):
+        """Adds a extra selection on a editor instance"""
+        if not isinstance(selection, list):
+            selection = [selection]
+        self.__selections[kind] = selection
+        self.update()
+
+    def remove(self, kind):
+        """Removes a extra selection from the editor"""
+        if kind in self.__selections:
+            self.__selections[kind].clear()
+            self.update()
+
+    def items(self):
+        return self.__selections.items()
+
+    def remove_all(self):
+        for kind in self:
+            self.remove(kind)
+
+    def update(self):
+        selections = []
+        for kind, selection in self.__selections.items():
+            selections.extend(selection)
+        selections = sorted(selections, key=lambda sel: sel.order)
+        self._neditor.setExtraSelections(selections)
+
+
+def create_editor(neditable=None):
+    neditor = NEditor(neditable)
+    language = neditable.language()
+    if language is None:
+        # For python files without the extension
+        # FIXME: Move to another module
+        # FIXME: Generalize it?
+        for line in neditor.text.splitlines():
+            if not line.strip():
+                continue
+            if line.startswith("#!"):
+                shebang = line[2:]
+                if "python" in shebang:
+                    language = "python"
+            else:
+                break
+    neditor.register_syntax_for(language)
+    return neditor

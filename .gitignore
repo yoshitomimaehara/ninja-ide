@@ -13,14 +13,16 @@ dist/*
 ehthumbs.db
 Thumbs.db
 *.py[cod]
+*.qmlc
+*.jsc
 *~
 .directory
-
+.pytest_cache/
 
 # Developer
 .coverage
 .project
-
+.python-version
 
 # Misc
 *.swp

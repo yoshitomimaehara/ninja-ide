@@ -16,17 +16,16 @@
 # along with NINJA-IDE; If not, see <http://www.gnu.org/licenses/>.
 from __future__ import absolute_import
 
-from PyQt4.QtGui import QDialog
-from PyQt4.QtGui import QListWidget
-from PyQt4.QtGui import QTreeView
-from PyQt4.QtGui import QVBoxLayout
-from PyQt4.QtGui import QHBoxLayout
-from PyQt4.QtGui import QPushButton
-from PyQt4.QtGui import QAbstractItemView
-from PyQt4.QtGui import QFileSystemModel
-from PyQt4.QtGui import QHeaderView
-from PyQt4.QtCore import QDir
-from PyQt4.QtCore import SIGNAL
+from PyQt5.QtWidgets import QDialog
+from PyQt5.QtWidgets import QListWidget
+from PyQt5.QtWidgets import QTreeView
+from PyQt5.QtWidgets import QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout
+from PyQt5.QtWidgets import QPushButton
+from PyQt5.QtWidgets import QAbstractItemView
+from PyQt5.QtWidgets import QFileSystemModel
+from PyQt5.QtWidgets import QHeaderView
+from PyQt5.QtCore import QDir
 
 from ninja_ide import translations
 
@@ -36,10 +35,10 @@ class AddToProject(QDialog):
 
     def __init__(self, projects, parent=None):
         super(AddToProject, self).__init__(parent)
-        #pathProjects must be a list
+        # projects must be a list
         self._projects = projects
         self.setWindowTitle(translations.TR_ADD_FILE_TO_PROJECT)
-        self.pathSelected = ''
+        self.path_selected = ''
         vbox = QVBoxLayout(self)
 
         hbox = QHBoxLayout()
@@ -48,7 +47,7 @@ class AddToProject(QDialog):
             self._list.addItem(project.name)
         self._list.setCurrentRow(0)
         self._tree = QTreeView()
-        #self._tree.header().setHidden(True)
+        self._tree.setHeaderHidden(True)
         self._tree.setSelectionMode(QTreeView.SingleSelection)
         self._tree.setAnimated(True)
         self.load_tree(self._projects[0])
@@ -57,20 +56,18 @@ class AddToProject(QDialog):
         vbox.addLayout(hbox)
 
         hbox2 = QHBoxLayout()
-        btnAdd = QPushButton(translations.TR_ADD_HERE)
-        btnCancel = QPushButton(translations.TR_CANCEL)
-        hbox2.addWidget(btnCancel)
-        hbox2.addWidget(btnAdd)
+        btn_add = QPushButton(translations.TR_ADD_HERE)
+        btn_cancel = QPushButton(translations.TR_CANCEL)
+        hbox2.addWidget(btn_cancel)
+        hbox2.addWidget(btn_add)
         vbox.addLayout(hbox2)
 
-        self.connect(btnCancel, SIGNAL("clicked()"), self.close)
-        self.connect(btnAdd, SIGNAL("clicked()"), self._select_path)
-        self.connect(self._list,
-             SIGNAL("currentItemChanged(QTreeWidgetItem*, QTreeWidgetItem*)"),
-             self._project_changed)
+        btn_add.clicked.connect(self._select_path)
+        btn_cancel.clicked.connect(self.close)
+        self._list.currentItemChanged.connect(self._project_changed)
 
     def _project_changed(self, item, previous):
-        #FIXME, this is not being called, at least in osx
+        # FIXME, this is not being called, at least in osx
         for each_project in self._projects:
             if each_project.name == item.text():
                 self.load_tree(each_project)
@@ -90,20 +87,20 @@ class AddToProject(QDialog):
 
         t_header = self._tree.header()
         t_header.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        t_header.setResizeMode(0, QHeaderView.Stretch)
+        t_header.setSectionResizeMode(0, QHeaderView.Stretch)
         t_header.setStretchLastSection(False)
-        t_header.setClickable(True)
+        t_header.setSectionsClickable(True)
 
         self._tree.hideColumn(1)  # Size
         self._tree.hideColumn(2)  # Type
         self._tree.hideColumn(3)  # Modification date
 
-        #FIXME: Changing the name column's title requires some magic
-        #Please look at the project tree
+        # FIXME: Changing the name column's title requires some magic
+        # Please look at the project tree
 
     def _select_path(self):
-        """Set pathSelected to the folder selected in the tree."""
+        """Set path_selected to the folder selected in the tree."""
         path = self._tree.model().filePath(self._tree.currentIndex())
         if path:
-            self.pathSelected = path
+            self.path_selected = path
             self.close()

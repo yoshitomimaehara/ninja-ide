@@ -21,21 +21,21 @@ from __future__ import unicode_literals
 
 import os
 
-from PyQt4.QtGui import QWidget
-from PyQt4.QtGui import QVBoxLayout
-from PyQt4.QtGui import QHBoxLayout
-from PyQt4.QtGui import QGroupBox
-from PyQt4.QtGui import QCheckBox
-from PyQt4.QtGui import QComboBox
-from PyQt4.QtGui import QStyle
-from PyQt4.QtGui import QToolBar
-from PyQt4.QtGui import QLabel
-from PyQt4.QtGui import QSizePolicy
-from PyQt4.QtGui import QIcon
-from PyQt4.QtGui import QPushButton
-from PyQt4.QtCore import Qt
-from PyQt4.QtCore import SIGNAL
-from PyQt4.QtCore import QSize
+from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout
+from PyQt5.QtWidgets import QGroupBox
+from PyQt5.QtWidgets import QCheckBox
+from PyQt5.QtWidgets import QComboBox
+from PyQt5.QtWidgets import QLineEdit
+from PyQt5.QtWidgets import QStyle
+from PyQt5.QtWidgets import QToolBar
+from PyQt5.QtWidgets import QLabel
+from PyQt5.QtWidgets import QSizePolicy
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QPushButton
+from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize
 
 from ninja_ide import resources
 from ninja_ide import translations
@@ -55,12 +55,15 @@ class Interface(QWidget):
 
         groupBoxExplorer = QGroupBox(
             translations.TR_PREFERENCES_INTERFACE_EXPLORER_PANEL)
-        #groupBoxToolbar = QGroupBox(
-            #translations.TR_PREFERENCES_INTERFACE_TOOLBAR_CUSTOMIZATION)
+        group_theme = QGroupBox(
+            translations.TR_PREFERENCES_THEME)
+        group_hdpi = QGroupBox(translations.TR_PREFERENCES_SCREEN_RESOLUTION)
+        # groupBoxToolbar = QGroupBox(
+        #    translations.TR_PREFERENCES_INTERFACE_TOOLBAR_CUSTOMIZATION)
         groupBoxLang = QGroupBox(
             translations.TR_PREFERENCES_INTERFACE_LANGUAGE)
 
-       #Explorer
+       # Explorers
         vboxExplorer = QVBoxLayout(groupBoxExplorer)
         self._checkProjectExplorer = QCheckBox(
             translations.TR_PREFERENCES_SHOW_EXPLORER)
@@ -77,6 +80,31 @@ class Interface(QWidget):
         vboxExplorer.addWidget(self._checkWebInspetor)
         vboxExplorer.addWidget(self._checkFileErrors)
         vboxExplorer.addWidget(self._checkMigrationTips)
+        # Theme
+        vbox_theme = QVBoxLayout(group_theme)
+        hbox = QHBoxLayout()
+        hbox.addWidget(QLabel(translations.TR_PREFERENCES_NINJA_THEME))
+        self._combobox_themes = QComboBox()
+        # self._combobox_themes.addItems(theme.available_theme_names())
+        self._combobox_themes.setCurrentText(settings.NINJA_SKIN)
+        hbox.addWidget(self._combobox_themes)
+        vbox_theme.addLayout(hbox)
+        vbox_theme.addWidget(
+            QLabel(translations.TR_PREFERENCES_REQUIRES_RESTART))
+        # HDPI
+        hbox = QHBoxLayout(group_hdpi)
+        self._combo_resolution = QComboBox()
+        self._combo_resolution.addItems([
+            translations.TR_PREFERENCES_SCREEN_NORMAL,
+            translations.TR_PREFERENCES_SCREEN_AUTO_HDPI,
+            translations.TR_PREFERENCES_SCREEN_CUSTOM_HDPI
+        ])
+        self._combo_resolution.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hbox.addWidget(self._combo_resolution)
+        self._line_custom_hdpi = QLineEdit()
+        self._line_custom_hdpi.setPlaceholderText("1.5")
+        hbox.addWidget(self._line_custom_hdpi)
         #GUI - Toolbar
         #vbox_toolbar = QVBoxLayout(groupBoxToolbar)
         #hbox_select_items = QHBoxLayout()
@@ -107,7 +135,7 @@ class Interface(QWidget):
         #vbox_toolbar.addWidget(self._toolbar_items)
         #vbox_toolbar.addWidget(QLabel(
             #translations.TR_PREFERENCES_TOOLBAR_CONFIG_HELP))
-        #Language
+        # Language
         vboxLanguage = QVBoxLayout(groupBoxLang)
         vboxLanguage.addWidget(QLabel(
             translations.TR_PREFERENCES_SELECT_LANGUAGE))
@@ -117,31 +145,47 @@ class Interface(QWidget):
         vboxLanguage.addWidget(QLabel(
             translations.TR_PREFERENCES_REQUIRES_RESTART))
 
-       #Load Languages
+        # Load Languages
         self._load_langs()
 
-       #Settings
+        # Settings
         self._checkProjectExplorer.setChecked(
             settings.SHOW_PROJECT_EXPLORER)
         self._checkSymbols.setChecked(settings.SHOW_SYMBOLS_LIST)
         self._checkWebInspetor.setChecked(settings.SHOW_WEB_INSPECTOR)
         self._checkFileErrors.setChecked(settings.SHOW_ERRORS_LIST)
         self._checkMigrationTips.setChecked(settings.SHOW_MIGRATION_LIST)
+        self._line_custom_hdpi.setText(settings.CUSTOM_SCREEN_RESOLUTION)
+        index = 0
+        if settings.HDPI:
+            index = 1
+        elif settings.CUSTOM_SCREEN_RESOLUTION:
+            index = 2
+        self._combo_resolution.setCurrentIndex(index)
 
         vbox.addWidget(groupBoxExplorer)
-        #vbox.addWidget(groupBoxToolbar)
+        vbox.addWidget(group_theme)
+        vbox.addWidget(group_hdpi)
+        # vbox.addWidget(groupBoxToolbar)
         vbox.addWidget(groupBoxLang)
+        vbox.addStretch(1)
 
-       #Signals
-        #self.connect(self._btnItemAdd, SIGNAL("clicked()"),
-                     #self.toolbar_item_added)
-        #self.connect(self._btnItemRemove, SIGNAL("clicked()"),
-                     #self.toolbar_item_removed)
-        #self.connect(self._btnDefaultItems, SIGNAL("clicked()"),
-                     #self.toolbar_items_default)
+        # Signals
+        # self.connect(self._btnItemAdd, SIGNAL("clicked()"),
+        #             # self.toolbar_item_added)
+        # self.connect(self._btnItemRemove, SIGNAL("clicked()"),
+        #             # self.toolbar_item_removed)
+        # self.connect(self._btnDefaultItems, SIGNAL("clicked()"),
+        #             # self.toolbar_items_default)
+        self._combo_resolution.currentIndexChanged.connect(
+            self._on_resolution_changed)
+        self._preferences.savePreferences.connect(self.save)
 
-        self.connect(self._preferences, SIGNAL("savePreferences()"), self.save)
-
+    def _on_resolution_changed(self, index):
+        enabled = False
+        if index == 2:
+            enabled = True
+        self._line_custom_hdpi.setEnabled(enabled)
     #def toolbar_item_added(self):
         #data = self._comboToolbarItems.itemData(
             #self._comboToolbarItems.currentIndex())
@@ -277,36 +321,62 @@ class Interface(QWidget):
 
     def save(self):
         qsettings = IDE.ninja_settings()
-        settings.TOOLBAR_ITEMS = self.toolbar_settings
-        lang = self._comboLang.currentText()
-        #preferences/interface
-        qsettings.setValue('preferences/interface/showProjectExplorer',
-                           self._checkProjectExplorer.isChecked())
+
+        qsettings.beginGroup("ide")
+        qsettings.beginGroup("interface")
+
+        ninja_theme = self._combobox_themes.currentText()
+        settings.NINJA_SKIN = ninja_theme
+        qsettings.setValue("skin", settings.NINJA_SKIN)
         settings.SHOW_PROJECT_EXPLORER = self._checkProjectExplorer.isChecked()
-        qsettings.setValue('preferences/interface/showSymbolsList',
-                           self._checkSymbols.isChecked())
+        qsettings.setValue("showProjectExplorer",
+                           settings.SHOW_PROJECT_EXPLORER)
         settings.SHOW_SYMBOLS_LIST = self._checkSymbols.isChecked()
-        qsettings.setValue('preferences/interface/showWebInspector',
-                           self._checkWebInspetor.isChecked())
-        settings.SHOW_WEB_INSPECTOR = self._checkWebInspetor.isChecked()
-        qsettings.setValue('preferences/interface/showErrorsList',
-                           self._checkFileErrors.isChecked())
-        settings.SHOW_ERRORS_LIST = self._checkFileErrors.isChecked()
-        qsettings.setValue('preferences/interface/showMigrationList',
-                           self._checkMigrationTips.isChecked())
-        settings.SHOW_MIGRATION_LIST = self._checkMigrationTips.isChecked()
+        qsettings.setValue("showSymbolsList", settings.SHOW_SYMBOLS_LIST)
+        if self._line_custom_hdpi.isEnabled():
+            screen_resolution = self._line_custom_hdpi.text().strip()
+            settings.CUSTOM_SCREEN_RESOLUTION = screen_resolution
+        else:
+            settings.HDPI = bool(self._combo_resolution.currentIndex())
+            qsettings.setValue("autoHdpi", settings.HDPI)
+            settings.CUSTOM_SCREEN_RESOLUTION = ""
+        qsettings.setValue("customScreenResolution",
+                           settings.CUSTOM_SCREEN_RESOLUTION)
+
+        qsettings.endGroup()
+        qsettings.endGroup()
+        # settings.TOOLBAR_ITEMS = self.toolbar_settings
+        # lang = self._comboLang.currentText()
+        #preferences/interface
+        # qsettings.setValue('preferences/interface/showProjectExplorer',
+        #                   self._checkProjectExplorer.isChecked())
+        # settings.SHOW_PROJECT_EXPLORER = self._checkProjectExplorer.isChecked()
+        # qsettings.setValue('preferences/interface/showSymbolsList',
+        #                   self._checkSymbols.isChecked())
+        # settings.SHOW_SYMBOLS_LIST = self._checkSymbols.isChecked()
+        # qsettings.setValue('preferences/interface/showWebInspector',
+        #                   self._checkWebInspetor.isChecked())
+        # settings.SHOW_WEB_INSPECTOR = self._checkWebInspetor.isChecked()
+        # qsettings.setValue('preferences/interface/showErrorsList',
+        #                   self._checkFileErrors.isChecked())
+        # settings.SHOW_ERRORS_LIST = self._checkFileErrors.isChecked()
+        # qsettings.setValue('preferences/interface/showMigrationList',
+        #                   self._checkMigrationTips.isChecked())
+        # settings.SHOW_MIGRATION_LIST = self._checkMigrationTips.isChecked()
         #qsettings.setValue('preferences/interface/toolbar',
                            #settings.TOOLBAR_ITEMS)
-        qsettings.setValue('preferences/interface/language', lang)
-        lang = lang + '.qm'
-        settings.LANGUAGE = os.path.join(resources.LANGS, lang)
+        # qsettings.setValue('preferences/interface/language', lang)
+        # lang = lang + '.qm'
+        # settings.LANGUAGE = os.path.join(resources.LANGS, lang)
         #ide = IDE.get_service('ide')
         #if ide:
             #ide.reload_toolbar()
 
 
 preferences.Preferences.register_configuration(
-    'INTERFACE',
+    'GENERAL',
     Interface,
     translations.TR_PREFERENCES_INTERFACE,
-    preferences.SECTIONS['INTERFACE'])
+    weight=0,
+    subsection="INTERFACE"
+)

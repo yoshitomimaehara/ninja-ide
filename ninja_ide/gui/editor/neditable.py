@@ -14,17 +14,15 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with NINJA-IDE; If not, see <http://www.gnu.org/licenses/>.
-from __future__ import absolute_import
-from __future__ import unicode_literals
-
 import collections
 
-from PyQt4.QtCore import QObject
-from PyQt4.QtCore import SIGNAL
+from PyQt5.QtCore import QObject
+from PyQt5.QtCore import pyqtSignal
 
 from ninja_ide.core.file_handling import file_manager
 from ninja_ide.gui.editor import checkers
 from ninja_ide.gui.editor import helpers
+from ninja_ide.core import settings
 
 
 class NEditable(QObject):
@@ -35,55 +33,84 @@ class NEditable(QObject):
     @fileClosing(PyQt_PyObject)
     @fileSaved(PyQt_PyObject)
     """
+    fileSaved = pyqtSignal('PyQt_PyObject')
+    fileLoaded = pyqtSignal(['PyQt_PyObject'], [str])
+    canBeRecovered = pyqtSignal('PyQt_PyObject')
+    fileRemoved = pyqtSignal('PyQt_PyObject')
+    fileChanged = pyqtSignal('PyQt_PyObject')
+    fileClosing = pyqtSignal('PyQt_PyObject')
+    askForSaveFileClosing = pyqtSignal('PyQt_PyObject')
+    checkersUpdated = pyqtSignal('PyQt_PyObject')
 
     def __init__(self, nfile=None):
         super(NEditable, self).__init__()
         self.__editor = None
-        #Create NFile
+        # Create NFile
         self._nfile = nfile
-        self.text_modified = False
         self._has_checkers = False
+        self.__language = None
+        self.text_modified = False
         self.ignore_checkers = False
-
-        #Checkers:
+        # Hot exit and autosave feature
+        from ninja_ide.core.file_handling import nswapfile
+        self._swap_file = nswapfile.NSwapFile(self)
+        # Checkers:
         self.registered_checkers = []
         self._checkers_executed = 0
 
         # Connect signals
         if self._nfile:
-            self.connect(self._nfile, SIGNAL("fileClosing(QString, bool)"),
-                         self._about_to_close_file)
-            self.connect(
-                self._nfile, SIGNAL("fileChanged()"),
-                lambda: self.emit(SIGNAL("fileChanged(PyQt_PyObject)"), self))
+            self._nfile.fileClosing['QString',
+                                    bool].connect(self._about_to_close_file)
+            self._nfile.fileChanged.connect(
+                lambda: self.fileChanged.emit(self))
+            self._nfile.fileRemoved.connect(
+                self._on_file_removed_from_disk)
+
+    def _on_file_removed_from_disk(self):
+        # FIXME: maybe we should ask for save, save as...
+        # self._nfile.close()
+        pass
 
     def extension(self):
-        #FIXME This sucks, we should have a way to define lang
+        # FIXME This sucks, we should have a way to define lang
         if self._nfile is None:
             return ""
         return self._nfile.file_ext()
+
+    def language(self):
+        if self.__language is None:
+            self.__language = settings.LANGUAGE_MAP.get(self.extension())
+            if self.__language is None and self._nfile.is_new_file:
+                self.__language = "python"
+        return self.__language
 
     def _about_to_close_file(self, path, force_close):
         modified = False
         if self.__editor:
             modified = self.__editor.is_modified
         if modified and not force_close:
-            self.emit(SIGNAL("askForSaveFileClosing(PyQt_PyObject)"), self)
+            self.askForSaveFileClosing.emit(self)
         else:
             self._nfile.remove_watcher()
-            self.emit(SIGNAL("fileClosing(PyQt_PyObject)"), self)
+            self.fileClosing.emit(self)
+
+    def clone(self):
+        clone = self.__class__(self._nfile)
+        return clone
 
     def set_editor(self, editor):
         """Set the Editor (UI component) associated with this object."""
         self.__editor = editor
         # If we have an editor, let's include the checkers:
-        self.include_checkers()
+        self.include_checkers(self.language())
         content = ''
         if not self._nfile.is_new_file:
             content = self._nfile.read()
             self._nfile.start_watching()
-            self.__editor.setText(content)
-            self.__editor.setModified(False)
+            self.__editor.text = content
+            self.__editor.document().setModified(False)
+            # self.create_swap_file()
             encoding = file_manager.get_file_encoding(content)
             self.__editor.encoding = encoding
             if not self.ignore_checkers:
@@ -91,22 +118,31 @@ class NEditable(QObject):
             else:
                 self.ignore_checkers = False
 
-        #New file then try to add a coding line
+        # New file then try to add a coding line
         if not content:
             helpers.insert_coding_line(self.__editor)
+
+        self.fileLoaded.emit(self)
+        self.fileLoaded[str].emit(self.file_path)
 
     def reload_file(self):
         if self._nfile:
             content = self._nfile.read()
             self._nfile.start_watching()
-            self.__editor.setText(content)
-            self.__editor.setModified(False)
+            self.__editor.text = content
+            self.__editor.document().setModified(False)
             encoding = file_manager.get_file_encoding(content)
             self.__editor.encoding = encoding
             if not self.ignore_checkers:
                 self.run_checkers(content)
             else:
                 self.ignore_checkers = False
+
+    def discard(self):
+        self._swap_file.discard()
+
+    def recover(self):
+        self._swap_file.recover()
 
     @property
     def file_path(self):
@@ -154,18 +190,21 @@ class NEditable(QObject):
                 break
         return dirty
 
-    def save_content(self, path=None):
+    def save_content(self, path=None, force=False):
         """Save the content of the UI to a file."""
-        if self.__editor.is_modified:
-            content = self.__editor.text()
+
+        # if self._swap_file is None:
+        #     self.create_swap_file()
+        if self.__editor.is_modified or force:
+            content = self.__editor.text
             nfile = self._nfile.save(content, path)
             self._nfile = nfile
             if not self.ignore_checkers:
                 self.run_checkers(content)
             else:
                 self.ignore_checkers = False
-            self.__editor.setModified(False)
-            self.emit(SIGNAL("fileSaved(PyQt_PyObject)"), self)
+            self.__editor.document().setModified(False)
+            self.fileSaved.emit(self)
 
     def include_checkers(self, lang='python'):
         """Initialize the Checkers, should be refreshed on checkers change."""
@@ -176,8 +215,7 @@ class NEditable(QObject):
             Checker, color, priority = values
             check = Checker(self.__editor)
             self.registered_checkers[i] = (check, color, priority)
-            self.connect(check, SIGNAL("finished()"),
-                         self.show_checkers_notifications)
+            check.finished.connect(self.show_checkers_notifications)
 
     def run_checkers(self, content, path=None, encoding=None):
         for items in self.registered_checkers:
@@ -189,7 +227,7 @@ class NEditable(QObject):
         self._checkers_executed += 1
         if self._checkers_executed == len(self.registered_checkers):
             self._checkers_executed = 0
-            self.emit(SIGNAL("checkersUpdated(PyQt_PyObject)"), self)
+            self.checkersUpdated.emit(self)
 
     def update_checkers_display(self):
         for items in self.registered_checkers:
